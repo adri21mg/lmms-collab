@@ -35,6 +35,7 @@
 #include "AutomatableButton.h"
 #include "AutomationClip.h"
 #include "AutomationTrackView.h"
+#include "CollabSession.h"
 #include "ColorChooser.h"
 #include "ConfigManager.h"
 #include "embed.h"
@@ -42,6 +43,7 @@
 #include "InstrumentTrackView.h"
 #include "lmms_math.h"
 #include "KeyboardShortcuts.h"
+#include "PatternStore.h"
 #include "Song.h"
 #include "StringPairDrag.h"
 #include "Track.h"
@@ -191,6 +193,16 @@ void TrackOperationsWidget::clearTrack()
 
 void TrackOperationsWidget::removeTrack()
 {
+	// The last pattern track stores the Pattern Editor's tracks; the collaboration server keeps it
+	const Track* track = m_trackView->getTrack();
+	if (collab::CollabSession::instance()->state() == collab::CollabSession::State::Live
+		&& track->type() == Track::Type::Pattern && Engine::patternStore()->numOfPatterns() <= 1)
+	{
+		QMessageBox::information(this, tr("Remove track"),
+			tr("The last pattern cannot be removed during a collaboration session: "
+			   "it also stores the Pattern Editor's instruments."));
+		return;
+	}
 	if (confirmRemoval())
 	{
 		emit trackRemovalScheduled(m_trackView);
