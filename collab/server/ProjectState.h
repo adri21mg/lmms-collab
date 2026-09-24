@@ -40,11 +40,11 @@ namespace lmms::collab
 class ProjectState
 {
 public:
-	//! Parses a project sent by a client or read from disk. Private UI state (editor windows, loop points)
-	//! is removed, see stripPrivateState(). Returns false with @p error set if it is not a usable project.
+	//! Parses a project sent by a client or read from disk. Private state (editor windows, loop points,
+	//! solo) is removed, see normalize(). Returns false with @p error set if it is not a usable project.
 	bool load(const QByteArray& mmp, QString& error);
 
-	//! Validates and applies one operation. Invalid or stale operations (unknown clip or note, bad values)
+	//! Validates and applies one operation. Invalid or stale operations (unknown objects, bad values)
 	//! are rejected without changing anything; that is how last-write-wins resolves e.g. edit-after-delete.
 	bool apply(const QJsonObject& op);
 
@@ -56,13 +56,29 @@ public:
 private:
 	using Id = std::uint64_t;
 
-	void stripPrivateState();
+	bool applyNoteOp(const QString& type, const QJsonObject& op);
+	bool applyTrackOp(const QString& type, const QJsonObject& op);
+	bool applyClipOp(const QString& type, const QJsonObject& op);
+
+	//! Removes private state from a project or from a track sent by a client
+	static void normalize(QDomElement root);
 	void index();
+	void indexTrack(const QDomElement& track, bool inSong);
+	void indexClip(const QDomElement& clip, Id trackId);
+	void unindexClip(Id clipId);
+	//! Parses a single element sent by a client; null element if invalid
+	static QDomElement parseFragment(const QJsonValue& xml, const QString& expectedTag);
+	//! True if the element (and everything with a cid inside it) uses ids not known yet
+	bool idsAreNew(const QDomElement& element) const;
 	void sortNotes(QDomElement& clip);
 
 	QDomDocument m_doc;
-	QHash<Id, QDomElement> m_clips;                  // midiclip elements by clip id
-	QHash<Id, QHash<Id, QDomElement>> m_notes;       // note elements by clip id, note id
+	QDomElement m_songContainer;
+	QHash<Id, QDomElement> m_tracks;             // every track by id
+	QSet<Id> m_songTracks;                       // tracks of the Song Editor (structure is shared)
+	QHash<Id, QDomElement> m_clips;              // clip elements by id
+	QHash<Id, Id> m_clipTrack;                   // track id of each clip
+	QHash<Id, QHash<Id, QDomElement>> m_notes;   // note elements by clip id, note id (MIDI clips only)
 	QSet<Id> m_unsortedClips;
 };
 

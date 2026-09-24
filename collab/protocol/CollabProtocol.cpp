@@ -24,7 +24,10 @@
 
 #include "CollabProtocol.h"
 
+#include <algorithm>
+
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QtEndian>
 
 namespace lmms::collab::proto
@@ -146,6 +149,61 @@ bool NoteValues::isValid(Field f, int value)
 	case Type: return value == 0 || value == 1;
 	default: return false;
 	}
+}
+
+
+const std::vector<FieldSpec>& trackFields()
+{
+	using K = FieldSpec::Kind;
+	static const std::vector<FieldSpec> fields = {
+		{"name", K::String}, {"muted", K::Bool}, {"color", K::Color}};
+	return fields;
+}
+
+
+const std::vector<FieldSpec>& clipFields()
+{
+	using K = FieldSpec::Kind;
+	constexpr int MaxTicks = 1 << 30;
+	static const std::vector<FieldSpec> fields = {
+		{"pos", K::Int, 0, MaxTicks}, {"len", K::Int, 0, MaxTicks}, {"off", K::Int, -MaxTicks, MaxTicks},
+		{"name", K::String}, {"color", K::Color}, {"muted", K::Bool}, {"autoresize", K::Bool},
+		{"steps", K::Int, 1, 4096}};
+	return fields;
+}
+
+
+bool validFields(const QJsonObject& values, const std::vector<FieldSpec>& spec)
+{
+	for (auto it = values.begin(); it != values.end(); ++it)
+	{
+		const auto f = std::find_if(spec.begin(), spec.end(), [&](const FieldSpec& s) { return it.key() == s.name; });
+		if (f == spec.end()) { return false; }
+		const QJsonValue v = it.value();
+		switch (f->kind)
+		{
+		case FieldSpec::Kind::Int:
+		{
+			if (!v.isDouble()) { return false; }
+			const double d = v.toDouble();
+			if (d != static_cast<double>(static_cast<int>(d)) || d < f->min || d > f->max) { return false; }
+			break;
+		}
+		case FieldSpec::Kind::Bool:
+			if (!v.isBool()) { return false; }
+			break;
+		case FieldSpec::Kind::String:
+			if (!v.isString() || v.toString().size() > 256) { return false; }
+			break;
+		case FieldSpec::Kind::Color:
+		{
+			static const QRegularExpression re{"^(#[0-9a-fA-F]{6})?$"};
+			if (!v.isString() || !re.match(v.toString()).hasMatch()) { return false; }
+			break;
+		}
+		}
+	}
+	return true;
 }
 
 

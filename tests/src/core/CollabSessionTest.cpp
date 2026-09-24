@@ -24,6 +24,7 @@
 
 #include <QDomDocument>
 #include <QJsonArray>
+#include <QTextStream>
 #include <QProcess>
 #include <QRandomGenerator>
 #include <QTcpSocket>
@@ -97,6 +98,33 @@ public:
 		return {};
 	}
 
+	//! Next operation of type @p opType sent by someone else (other ops, e.g. derived clip lengths, are skipped)
+	QJsonObject nextForeignOp(const QString& opType, int timeoutMs = 3000)
+	{
+		QElapsedTimer timer;
+		timer.start();
+		while (timer.elapsed() < timeoutMs)
+		{
+			if (!m_ops.isEmpty())
+			{
+				const QJsonObject op = m_ops.takeFirst();
+				if (op.value("op").toString() == opType) { return op; }
+				continue;
+			}
+			const auto tx = nextForeignTx(timeoutMs - static_cast<int>(timer.elapsed()));
+			if (tx.isEmpty()) { break; }
+			for (const auto& op : tx.value("ops").toArray()) { m_ops.append(op.toObject()); }
+		}
+		return {};
+	}
+
+	//! Forgets everything received so far
+	void drain()
+	{
+		m_ops.clear();
+		while (!next({}, 200).isEmpty()) {}
+	}
+
 	QString clientId() const { return m_clientId; }
 
 private:
@@ -104,6 +132,7 @@ private:
 	proto::FrameDecoder m_decoder;
 	QString m_clientId;
 	qint64 m_ctx = 0;
+	QList<QJsonObject> m_ops;
 };
 
 
@@ -179,12 +208,10 @@ private slots:
 
 	void testLocalEditsReachPeer()
 	{
+		m_peer.drain();
 		// add
 		Note* note = m_clip->addNote(Note{TimePos{48}, TimePos{96}, 64}, false);
-		auto tx = m_peer.nextForeignTx();
-		QCOMPARE(tx.value("ops").toArray().size(), 1);
-		auto op = tx.value("ops").toArray().first().toObject();
-		QCOMPARE(op.value("op").toString(), QString{"note.add"});
+		auto op = m_peer.nextForeignOp("note.add");
 		QCOMPARE(proto::parseId(op.value("id")), note->collabId());
 		QCOMPARE(op.value("v").toObject().value("pos").toInt(), 96);
 		QCOMPARE(op.value("v").toObject().value("key").toInt(), 64);
@@ -193,28 +220,23 @@ private slots:
 		note->setPos(TimePos{144});
 		note->setKey(67);
 		emit m_clip->dataChanged();
-		tx = m_peer.nextForeignTx();
-		op = tx.value("ops").toArray().first().toObject();
-		QCOMPARE(op.value("op").toString(), QString{"note.set"});
+		op = m_peer.nextForeignOp("note.set");
 		QCOMPARE(op.value("v").toObject(), (QJsonObject{{"pos", 144}, {"key", 67}}));
 
 		// resize
 		note->setLength(TimePos{96});
 		emit m_clip->dataChanged();
-		tx = m_peer.nextForeignTx();
-		QCOMPARE(tx.value("ops").toArray().first().toObject().value("v").toObject(), (QJsonObject{{"len", 96}}));
+		QCOMPARE(m_peer.nextForeignOp("note.set").value("v").toObject(), (QJsonObject{{"len", 96}}));
 
 		// delete
 		const collab_id_t id = note->collabId();
 		m_clip->removeNote(note);
-		tx = m_peer.nextForeignTx();
-		op = tx.value("ops").toArray().first().toObject();
-		QCOMPARE(op.value("op").toString(), QString{"note.remove"});
-		QCOMPARE(proto::parseId(op.value("id")), id);
+		QCOMPARE(proto::parseId(m_peer.nextForeignOp("note.remove").value("id")), id);
 	}
 
 	void testRemoteEditsApplyWithoutEcho()
 	{
+		m_peer.drain();
 		const collab_id_t id = 0x00000000c0ffee01ULL;
 		m_peer.sendOps({noteOp("note.add", m_clip, id,
 			{{"key", 72}, {"pos", 48}, {"len", 24}, {"vol", 80}, {"pan", -10}, {"type", 0}})});
@@ -284,12 +306,14 @@ private:
 		edit();
 		emit m_clip->dataChanged();
 		QVERIFY(!m_peer.nextForeignTx().isEmpty());
+		m_peer.drain();
 	}
 
 	void remoteEdit(const QJsonObject& op)
 	{
 		m_peer.sendOps({op});
 		settle(200);
+		m_peer.drain();
 	}
 
 private slots:
@@ -309,16 +333,13 @@ private slots:
 		journal->undo();
 		QVERIFY(m_clip->findNote(mine) == nullptr);
 		QVERIFY(m_clip->findNote(theirs) != nullptr);
-		auto tx = m_peer.nextForeignTx();
-		QCOMPARE(tx.value("ops").toArray().first().toObject().value("op").toString(), QString{"note.remove"});
-		QCOMPARE(proto::parseId(tx.value("ops").toArray().first().toObject().value("id")), mine);
+		QCOMPARE(proto::parseId(m_peer.nextForeignOp("note.remove").value("id")), mine);
 
 		// Ctrl+Y brings it back with the same identity
 		journal->redo();
 		QVERIFY(m_clip->findNote(mine) != nullptr);
 		QCOMPARE(m_clip->findNote(mine)->key(), 50);
-		tx = m_peer.nextForeignTx();
-		QCOMPARE(tx.value("ops").toArray().first().toObject().value("op").toString(), QString{"note.add"});
+		QCOMPARE(proto::parseId(m_peer.nextForeignOp("note.add").value("id")), mine);
 		QVERIFY(m_clip->findNote(theirs) != nullptr);
 	}
 
@@ -344,28 +365,228 @@ private slots:
 		journal->undo();
 		QCOMPARE(m_clip->findNote(id)->pos().getTicks(), oldPos);
 		QCOMPARE(m_clip->findNote(id)->getVolume(), 42);
-		const auto tx = m_peer.nextForeignTx();
-		QCOMPARE(tx.value("ops").toArray().first().toObject().value("v").toObject(), (QJsonObject{{"pos", oldPos}}));
+		QCOMPARE(m_peer.nextForeignOp("note.set").value("v").toObject(), (QJsonObject{{"pos", oldPos}}));
 
-		// Undoing a whole-track snapshot never resurrects old notes or drops newer remote ones
+		// Undoing a whole-track checkpoint never resurrects old notes or drops newer remote ones
 		m_clip->getTrack()->addJournalCheckPoint();
 		const collab_id_t later = 0x00000000beef0002ULL;
 		remoteEdit(noteOp("note.add", m_clip, later,
 			{{"key", 55}, {"pos", 600}, {"len", 48}, {"vol", 100}, {"pan", 0}, {"type", 0}}));
 		remoteEdit(noteOp("note.remove", m_clip, theirs));
-		journal->undo(); // restores the track, which recreates its clips from the old snapshot
+		journal->undo();
 		settle(200);
-		auto clip = dynamic_cast<MidiClip*>(m_clip->getTrack()->getClips().front());
-		QVERIFY(clip != nullptr);
-		m_clip = clip; // the clip object was recreated, with the same identity
-		QVERIFY2(m_clip->findNote(later) != nullptr, "remote note added after the snapshot is kept");
-		QVERIFY2(m_clip->findNote(theirs) == nullptr, "remote removal after the snapshot is kept");
+		QVERIFY2(m_clip->findNote(later) != nullptr, "remote note added after the checkpoint is kept");
+		QVERIFY2(m_clip->findNote(theirs) == nullptr, "remote removal after the checkpoint is kept");
 
-		// ...and the recreated clip is still shared
+		// ...and the clip is still shared
+		m_peer.drain();
 		m_clip->findNote(id)->setKey(33);
 		emit m_clip->dataChanged();
-		QCOMPARE(m_peer.nextForeignTx().value("ops").toArray().first().toObject().value("v").toObject(),
-			(QJsonObject{{"key", 33}}));
+		QCOMPARE(m_peer.nextForeignOp("note.set").value("v").toObject(), (QJsonObject{{"key", 33}}));
+	}
+
+	// ---- M2a: Song Editor structure ----
+
+	void testLocalStructureReachesPeer()
+	{
+		m_peer.drain();
+		auto song = Engine::getSong();
+
+		// New track with a clip and a note: sent complete
+		auto track = dynamic_cast<InstrumentTrack*>(Track::create(Track::Type::Instrument, song));
+		auto clip = new MidiClip(track);
+		clip->movePosition(TimePos{192});
+		Note* note = clip->addNote(Note{TimePos{48}, TimePos{0}, 62}, false);
+		auto op = m_peer.nextForeignOp("track.add");
+		QDomDocument doc;
+		QVERIFY(static_cast<bool>(doc.setContent(op.value("xml").toString())));
+		QCOMPARE(proto::parseId(doc.documentElement().attribute("cid")), track->collabId());
+		QVERIFY2(op.value("xml").toString().contains(proto::idString(clip->collabId())), "the clip travels with its track");
+		QVERIFY2(op.value("xml").toString().contains(proto::idString(note->collabId())), "and its notes");
+		m_newTrackXml = op.value("xml").toString();
+
+		// Its notes are shared from now on
+		note->setKey(63);
+		emit clip->dataChanged();
+		QCOMPARE(m_peer.nextForeignOp("note.set").value("v").toObject(), (QJsonObject{{"key", 63}}));
+
+		// Clip move, rename, mute and color
+		clip->movePosition(TimePos{384});
+		QCOMPARE(m_peer.nextForeignOp("clip.set").value("v").toObject(), (QJsonObject{{"pos", 384}}));
+		clip->setName("Riff");
+		clip->toggleMute();
+		clip->setColor(QColor{"#ff0000"});
+		QCOMPARE(m_peer.nextForeignOp("clip.set").value("v").toObject(),
+			(QJsonObject{{"name", "Riff"}, {"muted", true}, {"color", "#ff0000"}}));
+
+		// Track rename and color
+		track->setName("Lead");
+		QCOMPARE(m_peer.nextForeignOp("track.set").value("v").toObject(), (QJsonObject{{"name", "Lead"}}));
+
+		// New clip, then remove it
+		auto second = new MidiClip(track);
+		second->movePosition(TimePos{768});
+		op = m_peer.nextForeignOp("clip.add");
+		QCOMPARE(proto::parseId(op.value("track")), track->collabId());
+		const collab_id_t secondId = second->collabId();
+		delete second;
+		QCOMPARE(proto::parseId(m_peer.nextForeignOp("clip.remove").value("id")), secondId);
+
+		// Remove the track
+		const collab_id_t trackId = track->collabId();
+		delete track;
+		QCOMPARE(proto::parseId(m_peer.nextForeignOp("track.remove").value("id")), trackId);
+	}
+
+	void testRemoteStructureApplies()
+	{
+		m_peer.drain();
+		auto song = Engine::getSong();
+
+		// A track created by the peer (reuse the XML format LMMS produced, with fresh ids)
+		QString xml = m_newTrackXml;
+		QDomDocument doc;
+		QVERIFY(static_cast<bool>(doc.setContent(xml)));
+		const collab_id_t trackId = 0x00000000aaaa0001ULL;
+		const collab_id_t clipId = 0x00000000aaaa0002ULL;
+		QDomElement root = doc.documentElement();
+		root.setAttribute("cid", proto::idString(trackId));
+		root.setAttribute("name", "From Yeray");
+		root.firstChildElement("midiclip").setAttribute("cid", proto::idString(clipId));
+		QString text;
+		QTextStream ts{&text};
+		root.save(ts, 0);
+		m_peer.sendOps({QJsonObject{{"op", "track.add"}, {"container", "song"}, {"index", -1}, {"xml", text}}});
+		QTRY_VERIFY(findTrack(trackId) != nullptr);
+		QCOMPARE(findTrack(trackId)->name(), QString{"From Yeray"});
+		QTRY_VERIFY(findClip(clipId) != nullptr);
+
+		// Remote notes in the remote clip
+		auto clip = dynamic_cast<MidiClip*>(findClip(clipId));
+		const collab_id_t noteId = 0x00000000aaaa0003ULL;
+		m_peer.sendOps({noteOp("note.add", clip, noteId,
+			{{"key", 40}, {"pos", 0}, {"len", 48}, {"vol", 100}, {"pan", 0}, {"type", 0}})});
+		QTRY_VERIFY(clip->findNote(noteId) != nullptr);
+
+		// Clip changes, track rename
+		m_peer.sendOps({QJsonObject{{"op", "clip.set"}, {"id", proto::idString(clipId)},
+			{"v", QJsonObject{{"pos", 960}, {"name", "Bass"}}}}});
+		QTRY_COMPARE(clip->startPosition().getTicks(), 960);
+		QCOMPARE(clip->name(), QString{"Bass"});
+		m_peer.sendOps({QJsonObject{{"op", "track.set"}, {"id", proto::idString(trackId)},
+			{"v", QJsonObject{{"name", "Bass line"}}}}});
+		QTRY_COMPARE(findTrack(trackId)->name(), QString{"Bass line"});
+
+		// Order: move the remote track to the front of the shared tracks
+		QJsonArray ids{proto::idString(trackId)};
+		for (Track* t : song->tracks())
+		{
+			if (t->collabId() != trackId && t->type() != Track::Type::Pattern) { ids.append(proto::idString(t->collabId())); }
+		}
+		m_peer.sendOps({QJsonObject{{"op", "track.order"}, {"container", "song"}, {"ids", ids}}});
+		QTRY_VERIFY(std::find_if(song->tracks().begin(), song->tracks().end(),
+			[](Track* t) { return t->type() != Track::Type::Pattern; }) != song->tracks().end()
+			&& (*std::find_if(song->tracks().begin(), song->tracks().end(),
+			[](Track* t) { return t->type() != Track::Type::Pattern; }))->collabId() == trackId);
+
+		QVERIFY2(m_peer.nextForeignTx(500).isEmpty(), "no echo of remote structure changes");
+
+		// Remote removal of the clip and the track
+		m_peer.sendOps({QJsonObject{{"op", "clip.remove"}, {"id", proto::idString(clipId)}}});
+		QTRY_VERIFY(findClip(clipId) == nullptr);
+		m_peer.sendOps({QJsonObject{{"op", "track.remove"}, {"id", proto::idString(trackId)}}});
+		QTRY_VERIFY(findTrack(trackId) == nullptr);
+		QVERIFY2(m_peer.nextForeignTx(500).isEmpty(), "no echo of remote removals");
+	}
+
+	void testSoloStaysPrivate()
+	{
+		m_peer.drain();
+		auto song = Engine::getSong();
+		auto a = Track::create(Track::Type::Instrument, song);
+		auto b = Track::create(Track::Type::Instrument, song);
+		m_peer.nextForeignOp("track.add");
+		m_peer.nextForeignOp("track.add");
+		m_peer.drain();
+
+		// My solo mutes other tracks locally, but that must not reach the peer
+		a->setSolo(true);
+		a->toggleSolo(); // what the track's view does when its solo button changes
+		QVERIFY(b->isMuted());
+		QVERIFY2(m_peer.nextForeignOp("track.set", 500).isEmpty(), "solo is private");
+
+		// The peer mutes b meanwhile: it becomes b's mute after my solo
+		m_peer.sendOps({QJsonObject{{"op", "track.set"}, {"id", proto::idString(b->collabId())},
+			{"v", QJsonObject{{"muted", true}}}}});
+		settle(300);
+		a->setSolo(false);
+		a->toggleSolo();
+		QVERIFY2(b->isMuted(), "the shared mute applies when my solo ends");
+		QVERIFY2(!a->isMuted(), "a was never muted");
+		QVERIFY2(m_peer.nextForeignOp("track.set", 500).isEmpty(), "ending my solo sends nothing");
+
+		delete a;
+		delete b;
+		m_peer.drain();
+	}
+
+	void testClipUndoIsPerUser()
+	{
+		m_peer.drain();
+		auto journal = Engine::projectJournal();
+		Track* track = m_clip->getTrack();
+
+		// I delete a clip (as the Song Editor does: track checkpoint, then removal)
+		auto clip = new MidiClip(dynamic_cast<InstrumentTrack*>(track));
+		clip->movePosition(TimePos{1536});
+		const collab_id_t noteId = clip->addNote(Note{TimePos{48}, TimePos{0}, 70}, false)->collabId();
+		m_peer.nextForeignOp("clip.add");
+		m_peer.drain();
+		const collab_id_t clipId = clip->collabId();
+		track->addJournalCheckPoint();
+		delete clip;
+		QCOMPARE(proto::parseId(m_peer.nextForeignOp("clip.remove").value("id")), clipId);
+
+		// Ctrl+Z brings it back with the same identity and its notes
+		journal->undo();
+		QVERIFY(findClip(clipId) != nullptr);
+		QVERIFY(dynamic_cast<MidiClip*>(findClip(clipId))->findNote(noteId) != nullptr);
+		const auto added = m_peer.nextForeignOp("clip.add");
+		QVERIFY(added.value("xml").toString().contains(proto::idString(clipId)));
+
+		// I move it, the peer moves it afterwards: my Ctrl+Z leaves the peer's position
+		clip = dynamic_cast<MidiClip*>(findClip(clipId));
+		clip->addJournalCheckPoint();
+		clip->movePosition(TimePos{1920});
+		m_peer.nextForeignOp("clip.set");
+		m_peer.sendOps({QJsonObject{{"op", "clip.set"}, {"id", proto::idString(clipId)}, {"v", QJsonObject{{"pos", 2304}}}}});
+		settle(300);
+		m_peer.drain();
+		journal->undo();
+		QCOMPARE(clip->startPosition().getTicks(), 2304);
+
+		// I add a clip, the peer adds a note into it: undoing my add must not delete the peer's work
+		track->addJournalCheckPoint();
+		auto mine = new MidiClip(dynamic_cast<InstrumentTrack*>(track));
+		mine->movePosition(TimePos{3072});
+		m_peer.nextForeignOp("clip.add");
+		const collab_id_t mineId = mine->collabId();
+		m_peer.sendOps({noteOp("note.add", mine, 0x00000000bbbb0001ULL,
+			{{"key", 60}, {"pos", 0}, {"len", 48}, {"vol", 100}, {"pan", 0}, {"type", 0}})});
+		settle(300);
+		journal->undo();
+		QVERIFY2(findClip(mineId) != nullptr, "a clip that others changed is not removed by my undo");
+	}
+private:
+	QString m_newTrackXml;
+
+	static Track* findTrack(collab_id_t id)
+	{
+		return const_cast<Track*>(static_cast<const Track*>(findOwner(IdScope::Track, id)));
+	}
+	static Clip* findClip(collab_id_t id)
+	{
+		return const_cast<Clip*>(static_cast<const Clip*>(findOwner(IdScope::Clip, id)));
 	}
 };
 

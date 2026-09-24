@@ -68,16 +68,17 @@ void ProjectJournal::undo()
 
 		if( jo )
 		{
-			if (s_hook) { s_hook->beforeRestore(jo); }
-
 			DataFile curState( DataFile::Type::JournalData );
 			jo->saveState( curState, curState.content() );
 			m_redoCheckPoints.push( CheckPoint( c.joID, curState, c.hookToken ) );
 
 			bool prev = isJournalling();
 			setJournalling( false );
-			jo->restoreState( c.data.content().firstChildElement() );
-			if (s_hook) { s_hook->afterRestore(jo, c.hookToken, true); }
+			if (!s_hook || !s_hook->restore(jo, c.hookToken, true))
+			{
+				jo->restoreState( c.data.content().firstChildElement() );
+				if (s_hook) { s_hook->restored(jo); }
+			}
 			setJournalling( prev );
 			Engine::getSong()->setModified();
 
@@ -102,16 +103,17 @@ void ProjectJournal::redo()
 
 		if( jo )
 		{
-			if (s_hook) { s_hook->beforeRestore(jo); }
-
 			DataFile curState( DataFile::Type::JournalData );
 			jo->saveState( curState, curState.content() );
 			m_undoCheckPoints.push( CheckPoint( c.joID, curState, c.hookToken ) );
 
 			bool prev = isJournalling();
 			setJournalling( false );
-			jo->restoreState( c.data.content().firstChildElement() );
-			if (s_hook) { s_hook->afterRestore(jo, c.hookToken, false); }
+			if (!s_hook || !s_hook->restore(jo, c.hookToken, false))
+			{
+				jo->restoreState( c.data.content().firstChildElement() );
+				if (s_hook) { s_hook->restored(jo); }
+			}
 			setJournalling( prev );
 			Engine::getSong()->setModified();
 			break;

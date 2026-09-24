@@ -37,11 +37,18 @@
 //     tx      {seq, clientId, ctx, ops[]}            accepted transaction, sent to every client incl. sender
 //     error   {message}
 //
-// Ops inside a tx (field names match LMMS' <note> XML attributes):
+// Ops inside a tx (field names match LMMS' XML attributes):
 //     {op:"note.add",    clip, id, v:{key,pos,len,vol,pan,type}}   all fields required
 //     {op:"note.set",    clip, id, v:{any subset}}                 absolute values, never deltas
 //     {op:"note.remove", clip, id}
-// clip/id are collaboration ids as 16 hex digits (see include/CollabId.h).
+//     {op:"track.add",   container:"song", index, xml}             complete <track> element (with its clips)
+//     {op:"track.remove", id}
+//     {op:"track.set",   id, v:{name, muted, color}}               any subset; color "" = no color
+//     {op:"track.order", container:"song", ids:[...]}              order of the shared tracks
+//     {op:"clip.add",    track, xml}                               complete clip element (with its notes)
+//     {op:"clip.remove", id}
+//     {op:"clip.set",    id, v:{pos,len,off,name,color,muted,autoresize,steps}}  any subset
+// clip/id/track are collaboration ids as 16 hex digits (see include/CollabId.h).
 
 #ifndef LMMS_COLLAB_PROTOCOL_H
 #define LMMS_COLLAB_PROTOCOL_H
@@ -49,6 +56,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include <QByteArray>
 #include <QJsonObject>
@@ -84,7 +92,35 @@ namespace op
 inline constexpr auto NoteAdd = "note.add";
 inline constexpr auto NoteSet = "note.set";
 inline constexpr auto NoteRemove = "note.remove";
+inline constexpr auto TrackAdd = "track.add";
+inline constexpr auto TrackRemove = "track.remove";
+inline constexpr auto TrackSet = "track.set";
+inline constexpr auto TrackOrder = "track.order";
+inline constexpr auto ClipAdd = "clip.add";
+inline constexpr auto ClipRemove = "clip.remove";
+inline constexpr auto ClipSet = "clip.set";
 } // namespace op
+
+//! The only track container synchronized so far (Song Editor); the Pattern Editor comes later
+inline constexpr auto SongContainer = "song";
+
+//! Description of one synchronized attribute of a track or clip
+struct FieldSpec
+{
+	enum class Kind { Int, Bool, String, Color };
+	const char* name;
+	Kind kind;
+	int min = 0;
+	int max = 0;
+};
+
+//! Shared track attributes (solo is private, see decision D9)
+const std::vector<FieldSpec>& trackFields();
+//! Shared clip attributes; "steps" only exists for MIDI clips
+const std::vector<FieldSpec>& clipFields();
+
+//! Checks every present field of @p values against @p spec (unknown fields are invalid)
+bool validFields(const QJsonObject& values, const std::vector<FieldSpec>& spec);
 
 //! Encodes one JSON message as a complete frame
 QByteArray encodeJsonFrame(const QJsonObject& message);

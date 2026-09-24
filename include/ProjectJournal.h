@@ -48,10 +48,11 @@ public:
 	virtual ~JournalHook() = default;
 	//! Called when a checkpoint is recorded for @p jo; the returned token is kept with the checkpoint
 	virtual std::uint64_t checkPointAdded(JournallingObject* jo) = 0;
-	//! Called right before an undo or redo restores @p jo from its checkpoint
-	virtual void beforeRestore(JournallingObject* jo) = 0;
-	//! Called after the restore, with the token of the checkpoint that was undone or redone
-	virtual void afterRestore(JournallingObject* jo, std::uint64_t token, bool undo) = 0;
+	//! Called for an undo (@p undo true) or redo of a checkpoint of @p jo. Returns true if the hook
+	//! performed it; the journal then does not restore its snapshot of @p jo.
+	virtual bool restore(JournallingObject* jo, std::uint64_t token, bool undo) = 0;
+	//! Called after the journal restored a snapshot of @p jo itself
+	virtual void restored(JournallingObject* jo) = 0;
 };
 
 

@@ -71,6 +71,10 @@ public:
 	//! Note with the given collaboration id, or nullptr
 	Note* findNote(collab_id_t id) const;
 
+	//! Number of steps shown by the step sequencer (beat clips)
+	int stepCount() const { return m_steps; }
+	void setStepCount(int steps);
+
 	void rearrangeAllNotes();
 	void clearNotes();
 

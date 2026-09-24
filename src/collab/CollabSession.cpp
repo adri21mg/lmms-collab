@@ -24,23 +24,31 @@
 
 #include "CollabSession.h"
 
+#include <algorithm>
+
 #include <QCoreApplication>
 #include <QDir>
+#include <QDomDocument>
 #include <QFile>
 #include <QGuiApplication>
 #include <QPointer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QTextStream>
 #include <QTimer>
 
 #include "AudioEngine.h"
+#include "AutomationClip.h"
 #include "ConfigManager.h"
 #include "Engine.h"
+#include "GuiApplication.h"
 #include "InstrumentTrack.h"
 #include "MidiClip.h"
 #include "Note.h"
 #include "PatternStore.h"
 #include "Song.h"
+#include "SongEditor.h"
+#include "TrackView.h"
 
 namespace lmms::collab
 {
@@ -48,9 +56,58 @@ namespace lmms::collab
 namespace
 {
 constexpr int FlushIntervalMs = 50;      // local changes are sent at most ~20 times per second
+constexpr int StructureIntervalMs = 50;  // how often the Song Editor structure is compared with the baseline
 constexpr int QueueRetryIntervalMs = 30; // how often to check whether a mouse gesture has ended
 
 using proto::NoteValues;
+
+//! Window geometry LMMS stores inside tracks (e.g. the instrument window); private (decision D9)
+const QStringList WindowAttributes = {"x", "y", "width", "height", "visible", "maximized", "minimized", "tab"};
+
+bool anySolo(const Track* track)
+{
+	const auto& tracks = track->trackContainer()->tracks();
+	return std::any_of(tracks.begin(), tracks.end(), [](const Track* t) { return t->isSolo(); });
+}
+
+//! Solo is private and works by muting other tracks, so the shared mute is the one from before the solo
+bool sharedMute(const Track* track)
+{
+	return anySolo(track) ? track->isMutedBeforeSolo() : track->isMuted();
+}
+
+QString elementToString(const QDomElement& element)
+{
+	QString text;
+	QTextStream stream{&text};
+	element.save(stream, 0);
+	return text;
+}
+
+QString pendingKey(char kind, collab_id_t id, const QString& field)
+{
+	return QString{"%1:%2:%3"}.arg(kind).arg(proto::idString(id), field);
+}
+
+QJsonObject changedFields(const QJsonObject& before, const QJsonObject& after)
+{
+	QJsonObject changed;
+	for (auto it = after.begin(); it != after.end(); ++it)
+	{
+		if (!it.key().startsWith('_') && before.value(it.key()) != it.value()) { changed.insert(it.key(), it.value()); }
+	}
+	return changed;
+}
+
+QJsonObject withoutPrivateKeys(QJsonObject fields)
+{
+	for (const QString& key : fields.keys())
+	{
+		if (key.startsWith('_')) { fields.remove(key); }
+	}
+	return fields;
+}
+
 } // namespace
 
 
@@ -72,6 +129,16 @@ proto::NoteValues NoteState::toValues() const
 	NoteValues v;
 	for (int f = 0; f < NoteValues::FieldCount; ++f) { v.fields[f] = fields[f]; }
 	return v;
+}
+
+
+std::optional<NoteState> NoteState::fromJson(const QJsonObject& obj)
+{
+	const auto values = NoteValues::fromJson(obj);
+	if (!values || !values->isComplete()) { return std::nullopt; }
+	NoteState s;
+	for (int f = 0; f < NoteValues::FieldCount; ++f) { s.fields[f] = *values->fields[f]; }
+	return s;
 }
 
 
@@ -103,10 +170,12 @@ CollabSession* CollabSession::instance()
 
 
 CollabSession::CollabSession() :
-	m_txQueueTimer(new QTimer(this))
+	m_txQueueTimer(new QTimer(this)),
+	m_structureTimer(new QTimer(this))
 {
 	m_txQueueTimer->setSingleShot(true);
 	connect(m_txQueueTimer, &QTimer::timeout, this, &CollabSession::processTxQueue);
+	connect(m_structureTimer, &QTimer::timeout, this, &CollabSession::flushStructure);
 }
 
 
@@ -115,6 +184,9 @@ CollabSession::~CollabSession()
 	stopTracking();
 }
 
+
+// ------------------------------------------------------------------------------------------------
+// Connection
 
 void CollabSession::connectToServer(const QString& host, quint16 port, const QString& user,
 	const QString& project, JoinMode mode)
@@ -143,7 +215,9 @@ void CollabSession::disconnectFromServer()
 {
 	stopTracking();
 	m_baselines.clear();
+	m_structure = Structure{};
 	m_pending.clear();
+	m_pendingStructure.clear();
 	m_gestures.clear();
 	m_openGesture.clear();
 	m_txQueue.clear();
@@ -180,6 +254,12 @@ void CollabSession::fail(const QString& message)
 void CollabSession::send(const QJsonObject& message)
 {
 	if (m_socket) { m_socket->write(proto::encodeJsonFrame(message)); }
+}
+
+
+void CollabSession::sendOps(const QJsonArray& ops)
+{
+	send({{"t", proto::msg::Tx}, {"ctx", m_nextCtx++}, {"ops", ops}});
 }
 
 
@@ -257,15 +337,24 @@ void CollabSession::handleJoined(const QJsonObject& message)
 void CollabSession::startTracking()
 {
 	stopTracking();
+
+	// Every track of the Song Editor at this moment is shared (also pattern and automation tracks,
+	// although only some of their changes are synchronized so far)
+	for (Track* track : Engine::getSong()->tracks())
+	{
+		const collab_id_t id = track->collabId();
+		m_structure.tracks.insert(id, trackFields(track));
+		m_structure.trackTypes.insert(id, static_cast<int>(track->type()));
+	}
+	m_structure = currentStructure();
+
+	// Notes of every MIDI clip, in the Song Editor and in the Pattern Editor
 	std::vector<Track*> tracks = Engine::getSong()->tracks();
 	const auto& patternTracks = Engine::patternStore()->tracks();
 	tracks.insert(tracks.end(), patternTracks.begin(), patternTracks.end());
-
 	for (Track* track : tracks)
 	{
-		auto instrumentTrack = dynamic_cast<InstrumentTrack*>(track);
-		if (!instrumentTrack) { continue; }
-		for (Clip* clip : instrumentTrack->getClips())
+		for (Clip* clip : track->getClips())
 		{
 			if (auto midiClip = dynamic_cast<MidiClip*>(clip))
 			{
@@ -273,22 +362,10 @@ void CollabSession::startTracking()
 				trackClip(midiClip);
 			}
 		}
-		// A shared clip can come back as a new object, e.g. when undo restores a deleted clip
-		m_trackConnections.append(connect(instrumentTrack, &Track::clipAdded, this, [this](Clip* clip) {
-			// Its saved id is only restored after creation, so look at it once the current event is done
-			QTimer::singleShot(0, this, [this, clip = QPointer<Clip>{clip}] {
-				auto midiClip = dynamic_cast<MidiClip*>(clip.data());
-				if (midiClip && m_state == State::Live && m_baselines.contains(midiClip->collabId())
-					&& m_trackers.find(midiClip) == m_trackers.end())
-				{
-					trackClip(midiClip);
-					onClipChanged(midiClip);
-				}
-			});
-		}));
 	}
 
 	ProjectJournal::setHook(this);
+	m_structureTimer->start(StructureIntervalMs);
 
 	// Loading another project replaces every shared object: the session cannot continue
 	m_trackConnections.append(connect(Engine::getSong(), &Song::projectLoaded, this, [this] {
@@ -302,6 +379,7 @@ void CollabSession::startTracking()
 
 void CollabSession::stopTracking()
 {
+	m_structureTimer->stop();
 	ProjectJournal::setHook(nullptr);
 	for (const auto& c : m_trackConnections) { disconnect(c); }
 	m_trackConnections.clear();
@@ -309,98 +387,18 @@ void CollabSession::stopTracking()
 }
 
 
-void CollabSession::trackClip(MidiClip* clip)
-{
-	auto tracker = std::make_unique<ClipTracker>();
-	tracker->timer.setSingleShot(true);
-	connect(&tracker->timer, &QTimer::timeout, this, [this, clip] { flushClip(clip); });
-	tracker->changed = connect(clip, &MidiClip::dataChanged, this, [this, clip] { onClipChanged(clip); });
-	tracker->destroyed = connect(clip, &MidiClip::destroyedMidiClip, this, [this](MidiClip* c) {
-		m_trackers.erase(c);
-	});
-	m_trackers[clip] = std::move(tracker);
-}
-
-
-void CollabSession::onClipChanged(MidiClip* clip)
-{
-	if (m_applyingRemote || m_state != State::Live) { return; }
-	const auto it = m_trackers.find(clip);
-	if (it != m_trackers.end() && !it->second->timer.isActive()) { it->second->timer.start(FlushIntervalMs); }
-}
-
-
-CollabSession::NoteMap CollabSession::currentNotes(const MidiClip& clip)
-{
-	NoteMap notes;
-	for (const Note* note : clip.notes()) { notes.insert(note->collabId(), NoteState::of(*note)); }
-	return notes;
-}
-
-
-void CollabSession::flushClip(MidiClip* clip)
+void CollabSession::flushAll()
 {
 	if (m_state != State::Live) { return; }
-	if (const auto it = m_trackers.find(clip); it != m_trackers.end()) { it->second->timer.stop(); }
-
-	const collab_id_t clipId = clip->collabId();
-	const QString clipIdStr = proto::idString(clipId);
-	NoteMap& baseline = m_baselines[clipId];
-	const NoteMap current = currentNotes(*clip);
-	const qint64 ctx = m_nextCtx;
-	QJsonArray ops;
-
-	// Remember this user's changes for undo, in the gesture that is open for this clip
-	Gesture* gesture = nullptr;
-	if (const auto open = m_openGesture.constFind(clipId); m_recordGestures && open != m_openGesture.cend())
-	{
-		if (const auto g = m_gestures.find(*open); g != m_gestures.end()) { gesture = &g->second; }
-	}
-	auto record = [gesture](collab_id_t id, const std::optional<NoteState>& before,
-		const std::optional<NoteState>& after) {
-		if (!gesture) { return; }
-		if (!gesture->before.contains(id)) { gesture->before.insert(id, before); }
-		gesture->after.insert(id, after);
-	};
-
-	for (auto it = current.cbegin(); it != current.cend(); ++it)
-	{
-		const auto base = baseline.constFind(it.key());
-		auto& pending = m_pending[{clipId, it.key()}];
-		NoteValues values;
-		for (int f = 0; f < NoteValues::FieldCount; ++f)
-		{
-			if (base == baseline.cend() || base->fields[f] != it->fields[f])
-			{
-				values.fields[f] = it->fields[f];
-				pending[f] = ctx;
-			}
-		}
-		if (values.isEmpty())
-		{
-			if (pending == PendingFields{}) { m_pending.remove({clipId, it.key()}); }
-			continue;
-		}
-		record(it.key(), base == baseline.cend() ? std::nullopt : std::optional{*base}, *it);
-		ops.append(QJsonObject{{"op", base == baseline.cend() ? proto::op::NoteAdd : proto::op::NoteSet},
-			{"clip", clipIdStr}, {"id", proto::idString(it.key())}, {"v", values.toJson()}});
-	}
-	for (auto it = baseline.cbegin(); it != baseline.cend(); ++it)
-	{
-		if (current.contains(it.key())) { continue; }
-		record(it.key(), *it, std::nullopt);
-		m_pending.remove({clipId, it.key()});
-		ops.append(QJsonObject{{"op", proto::op::NoteRemove}, {"clip", clipIdStr}, {"id", proto::idString(it.key())}});
-	}
-
-	baseline = current;
-	if (!ops.isEmpty())
-	{
-		send({{"t", proto::msg::Tx}, {"ctx", ctx}, {"ops", ops}});
-		++m_nextCtx;
-	}
+	flushStructure();
+	std::vector<MidiClip*> clips;
+	for (const auto& [clip, tracker] : m_trackers) { clips.push_back(clip); }
+	for (MidiClip* clip : clips) { flushClip(clip); }
 }
 
+
+// ------------------------------------------------------------------------------------------------
+// Incoming transactions
 
 void CollabSession::processTxQueue()
 {
@@ -431,61 +429,241 @@ void CollabSession::applyTx(const QJsonObject& message)
 			}
 			it = it.value() == PendingFields{} ? m_pending.erase(it) : std::next(it);
 		}
+		for (auto it = m_pendingStructure.begin(); it != m_pendingStructure.end();)
+		{
+			it = it.value() <= ctx ? m_pendingStructure.erase(it) : std::next(it);
+		}
 		return;
 	}
 
-	// Group consecutive ops of the same clip so each clip is updated (and re-sorted) once
 	const QJsonArray ops = message.value("ops").toArray();
-	QJsonArray group;
+	if (ops.isEmpty()) { return; }
+
+	// Send our own unsent edits first, so every baseline only holds synchronized state
+	flushAll();
+
+	const bool journalling = Engine::projectJournal()->isJournalling();
+	Engine::projectJournal()->setJournalling(false);
+
+	bool structureChanged = false;
+	QJsonArray noteGroup;
 	collab_id_t groupClip = 0;
-	for (const QJsonValue& op : ops)
+	auto flushNoteGroup = [&] {
+		if (!noteGroup.isEmpty()) { applyRemoteNoteOps(groupClip, noteGroup); }
+		noteGroup = QJsonArray{};
+	};
+	for (const QJsonValue& value : ops)
 	{
-		const collab_id_t clipId = proto::parseId(op.toObject().value("clip"));
-		if (clipId != groupClip && !group.isEmpty())
+		const QJsonObject op = value.toObject();
+		if (op.value("op").toString().startsWith("note."))
 		{
-			applyRemoteOps(groupClip, group);
-			group = QJsonArray{};
+			const collab_id_t clipId = proto::parseId(op.value("clip"));
+			if (clipId != groupClip) { flushNoteGroup(); }
+			groupClip = clipId;
+			noteGroup.append(op);
+			continue;
 		}
-		groupClip = clipId;
-		group.append(op);
+		flushNoteGroup();
+		applyRemoteStructureOp(op);
+		structureChanged = true;
 	}
-	if (!group.isEmpty()) { applyRemoteOps(groupClip, group); }
+	flushNoteGroup();
+
+	// Everything local was flushed before, so the model now is the synchronized structure. This also
+	// covers values derived from remote changes (e.g. a clip's length follows its notes): not echoed.
+	m_structure = currentStructure();
+	syncNoteTracking();
+	if (structureChanged) { Engine::getSong()->setModified(); }
+	Engine::projectJournal()->setJournalling(journalling);
 }
 
 
-std::uint64_t CollabSession::checkPointAdded(JournallingObject* jo)
-{
-	auto clip = dynamic_cast<MidiClip*>(jo);
-	if (m_state != State::Live || !clip || !m_baselines.contains(clip->collabId())) { return 0; }
+// ------------------------------------------------------------------------------------------------
+// Notes
 
-	// Changes made before this checkpoint belong to the previous gesture
-	flushClip(clip);
-	const std::uint64_t token = m_nextGesture++;
-	m_gestures[token] = Gesture{clip->collabId(), {}, {}};
-	m_openGesture[clip->collabId()] = token;
-	while (m_gestures.size() > 1000) { m_gestures.erase(m_gestures.begin()); } // journal keeps 100 anyway
-	return token;
+void CollabSession::trackClip(MidiClip* clip)
+{
+	if (m_trackers.find(clip) != m_trackers.end()) { return; }
+	auto tracker = std::make_unique<ClipTracker>();
+	tracker->timer.setSingleShot(true);
+	connect(&tracker->timer, &QTimer::timeout, this, [this, clip] { flushClip(clip); });
+	tracker->changed = connect(clip, &MidiClip::dataChanged, this, [this, clip] { onClipChanged(clip); });
+	tracker->destroyed = connect(clip, &MidiClip::destroyedMidiClip, this, [this](MidiClip* c) {
+		m_trackers.erase(c);
+	});
+	m_trackers[clip] = std::move(tracker);
 }
 
 
-void CollabSession::beforeRestore(JournallingObject*)
+void CollabSession::untrackClip(collab_id_t clipId)
 {
-	if (m_state != State::Live) { return; }
-	// Make sure every local change is synchronized (and recorded) before the journal restores anything
-	for (const auto& [clip, tracker] : m_trackers) { flushClip(clip); }
-}
-
-
-void CollabSession::afterRestore(JournallingObject*, std::uint64_t token, bool undo)
-{
-	if (m_state != State::Live) { return; }
-	// The journal restored an old snapshot; its notes may predate other users' changes
-	resyncSharedClips();
-	if (const auto g = m_gestures.find(token); token != 0 && g != m_gestures.end())
+	m_baselines.remove(clipId);
+	if (MidiClip* clip = findMidiClip(clipId)) { m_trackers.erase(clip); }
+	for (auto it = m_pending.begin(); it != m_pending.end();)
 	{
-		m_openGesture.remove(g->second.clip);
-		replayGesture(g->second, undo);
+		it = it.key().first == clipId ? m_pending.erase(it) : std::next(it);
 	}
+}
+
+
+void CollabSession::syncNoteTracking()
+{
+	// MIDI clips of the Song Editor come and go with the structure; Pattern Editor clips stay
+	for (auto it = m_structure.clips.cbegin(); it != m_structure.clips.cend(); ++it)
+	{
+		if (m_baselines.contains(it.key())) { continue; }
+		if (MidiClip* clip = findMidiClip(it.key()))
+		{
+			m_baselines[it.key()] = currentNotes(*clip);
+			trackClip(clip);
+		}
+	}
+	for (const collab_id_t clipId : m_baselines.keys())
+	{
+		if (m_structure.clips.contains(clipId)) { continue; }
+		// A Song Editor clip that is gone (Pattern Editor clips are not part of the structure yet)
+		MidiClip* clip = findMidiClip(clipId);
+		if (!clip || clip->getTrack()->trackContainer() == Engine::getSong()) { untrackClip(clipId); }
+	}
+}
+
+
+void CollabSession::onClipChanged(MidiClip* clip)
+{
+	if (m_applyingRemote || m_state != State::Live) { return; }
+	const auto it = m_trackers.find(clip);
+	if (it != m_trackers.end() && !it->second->timer.isActive()) { it->second->timer.start(FlushIntervalMs); }
+}
+
+
+CollabSession::NoteMap CollabSession::currentNotes(const MidiClip& clip)
+{
+	NoteMap notes;
+	for (const Note* note : clip.notes()) { notes.insert(note->collabId(), NoteState::of(*note)); }
+	return notes;
+}
+
+
+void CollabSession::flushClip(MidiClip* clip)
+{
+	if (m_state != State::Live) { return; }
+	if (const auto it = m_trackers.find(clip); it != m_trackers.end()) { it->second->timer.stop(); }
+
+	const collab_id_t clipId = clip->collabId();
+	if (!m_baselines.contains(clipId)) { return; }
+	const QString clipIdStr = proto::idString(clipId);
+	NoteMap& baseline = m_baselines[clipId];
+	const NoteMap current = currentNotes(*clip);
+	const qint64 ctx = m_nextCtx;
+	QJsonArray ops;
+
+	for (auto it = current.cbegin(); it != current.cend(); ++it)
+	{
+		const auto base = baseline.constFind(it.key());
+		auto& pending = m_pending[{clipId, it.key()}];
+		NoteValues values;
+		for (int f = 0; f < NoteValues::FieldCount; ++f)
+		{
+			if (base == baseline.cend() || base->fields[f] != it->fields[f])
+			{
+				values.fields[f] = it->fields[f];
+				pending[f] = ctx;
+			}
+		}
+		if (values.isEmpty())
+		{
+			if (pending == PendingFields{}) { m_pending.remove({clipId, it.key()}); }
+			continue;
+		}
+		record(Kind::Note, clipId, it.key(),
+			base == baseline.cend() ? ObjectState{} : ObjectState{base->toJson()}, it->toJson());
+		ops.append(QJsonObject{{"op", base == baseline.cend() ? proto::op::NoteAdd : proto::op::NoteSet},
+			{"clip", clipIdStr}, {"id", proto::idString(it.key())}, {"v", values.toJson()}});
+	}
+	for (auto it = baseline.cbegin(); it != baseline.cend(); ++it)
+	{
+		if (current.contains(it.key())) { continue; }
+		record(Kind::Note, clipId, it.key(), it->toJson(), std::nullopt);
+		m_pending.remove({clipId, it.key()});
+		ops.append(QJsonObject{{"op", proto::op::NoteRemove}, {"clip", clipIdStr}, {"id", proto::idString(it.key())}});
+	}
+
+	baseline = current;
+	if (!ops.isEmpty()) { sendOps(ops); }
+}
+
+
+void CollabSession::applyRemoteNoteOps(collab_id_t clipId, const QJsonArray& ops)
+{
+	if (!m_baselines.contains(clipId)) { return; } // not a shared clip
+	MidiClip* clip = findMidiClip(clipId);
+
+	NoteMap& baseline = m_baselines[clipId];
+	bool changed = false;
+	m_applyingRemote = true;
+	{
+		auto guard = Engine::audioEngine()->requestChangesGuard();
+		for (const QJsonValue& value : ops)
+		{
+			const QJsonObject op = value.toObject();
+			const QString type = op.value("op").toString();
+			const collab_id_t noteId = proto::parseId(op.value("id"));
+			Note* note = clip ? clip->findNote(noteId) : nullptr;
+
+			if (type == proto::op::NoteRemove)
+			{
+				baseline.remove(noteId);
+				m_pending.remove({clipId, noteId});
+				if (note) { clip->removeNote(note); changed = true; }
+				continue;
+			}
+
+			const auto values = NoteValues::fromJson(op.value("v").toObject());
+			if (!values) { continue; }
+			const PendingFields pending = m_pending.value({clipId, noteId});
+
+			if (type == proto::op::NoteAdd && !note && values->isComplete())
+			{
+				NoteState s;
+				for (int f = 0; f < NoteValues::FieldCount; ++f) { s.fields[f] = *values->fields[f]; }
+				if (clip)
+				{
+					writeNote(clip, noteId, s);
+					note = clip->findNote(noteId);
+					changed = true;
+				}
+				else { baseline.insert(noteId, s); }
+			}
+			else if (type == proto::op::NoteAdd || type == proto::op::NoteSet)
+			{
+				for (int f = 0; f < NoteValues::FieldCount; ++f)
+				{
+					const auto& v = values->fields[f];
+					if (!v || pending[f] != 0) { continue; } // our unacknowledged write wins
+					if (note)
+					{
+						NoteState s = NoteState::of(*note);
+						s.fields[f] = *v;
+						writeNote(clip, noteId, s);
+						changed = true;
+					}
+					else if (baseline.contains(noteId)) { baseline[noteId].fields[f] = *v; }
+				}
+			}
+			if (note) { baseline.insert(noteId, NoteState::of(*note)); }
+		}
+		if (clip && changed)
+		{
+			clip->rearrangeAllNotes();
+			clip->updateLength();
+		}
+	}
+	if (clip && changed)
+	{
+		emit clip->dataChanged();
+		Engine::getSong()->setModified();
+	}
+	m_applyingRemote = false;
 }
 
 
@@ -515,197 +693,642 @@ void CollabSession::writeNote(MidiClip* clip, collab_id_t id, const std::optiona
 }
 
 
-void CollabSession::resyncSharedClips()
+// ------------------------------------------------------------------------------------------------
+// Structure (Song Editor tracks and clips)
+
+bool CollabSession::syncsStructure(int trackType)
 {
-	m_applyingRemote = true; // what we write here is the synchronized state: nothing to send
-	for (auto it = m_baselines.cbegin(); it != m_baselines.cend(); ++it)
+	// Creating/removing pattern tracks changes the Pattern Editor (not shared yet); automation later
+	return trackType == static_cast<int>(Track::Type::Instrument) || trackType == static_cast<int>(Track::Type::Sample);
+}
+
+
+bool CollabSession::takesPartInOrder(int trackType)
+{
+	// Moving pattern tracks also swaps their patterns in the Pattern Editor, which is not shared yet
+	return trackType != static_cast<int>(Track::Type::Pattern);
+}
+
+
+QJsonObject CollabSession::trackFields(const Track* track)
+{
+	return {{"name", track->name()}, {"muted", sharedMute(track)},
+		{"color", track->color() ? track->color()->name() : QString{}}};
+}
+
+
+QJsonObject CollabSession::clipFields(const Clip* clip)
+{
+	QJsonObject fields{{"pos", clip->startPosition().getTicks()}, {"len", clip->length().getTicks()},
+		{"off", clip->startTimeOffset().getTicks()}, {"name", clip->name()},
+		{"color", clip->color() ? clip->color()->name() : QString{}}, {"muted", clip->isMuted()},
+		{"autoresize", clip->getAutoResize()}};
+	if (auto midiClip = dynamic_cast<const MidiClip*>(clip)) { fields.insert("steps", midiClip->stepCount()); }
+	return fields;
+}
+
+
+void CollabSession::applyTrackFields(Track* track, const QJsonObject& fields)
+{
+	if (fields.contains("name")) { track->setName(fields.value("name").toString()); }
+	if (fields.contains("color"))
 	{
-		MidiClip* clip = findClip(it.key());
-		if (!clip) { continue; }
-		const NoteMap current = currentNotes(*clip);
-		if (current == it.value()) { continue; }
+		const QString color = fields.value("color").toString();
+		track->setColor(color.isEmpty() ? std::nullopt : std::optional<QColor>{QColor{color}});
+	}
+	if (fields.contains("muted"))
+	{
+		const bool muted = fields.value("muted").toBool();
+		// While this user has a (private) solo, only the mute to restore after the solo changes
+		if (anySolo(track)) { track->setMutedBeforeSolo(muted); }
+		else { track->setMuted(muted); }
+	}
+}
+
+
+void CollabSession::applyClipFields(Clip* clip, const QJsonObject& fields)
+{
+	if (fields.contains("autoresize")) { clip->setAutoResize(fields.value("autoresize").toBool()); }
+	if (fields.contains("steps"))
+	{
+		if (auto midiClip = dynamic_cast<MidiClip*>(clip)) { midiClip->setStepCount(fields.value("steps").toInt()); }
+	}
+	if (fields.contains("off")) { clip->setStartTimeOffset(TimePos{fields.value("off").toInt()}); }
+	if (fields.contains("pos")) { clip->movePosition(TimePos{fields.value("pos").toInt()}); }
+	if (fields.contains("len")) { clip->changeLength(TimePos{fields.value("len").toInt()}); }
+	if (fields.contains("name")) { clip->setName(fields.value("name").toString()); }
+	if (fields.contains("color"))
+	{
+		const QString color = fields.value("color").toString();
+		clip->setColor(color.isEmpty() ? std::nullopt : std::optional<QColor>{QColor{color}});
+	}
+	if (fields.contains("muted") && fields.value("muted").toBool() != clip->isMuted()) { clip->toggleMute(); }
+}
+
+
+QString CollabSession::serialize(Track* track)
+{
+	QDomDocument doc;
+	QDomElement parent = doc.createElement("collab");
+	doc.appendChild(parent);
+	track->saveState(doc, parent);
+	QDomElement element = parent.firstChildElement();
+	for (const QString& tag : {QString{"instrumenttrack"}, QString{"sampletrack"}})
+	{
+		for (QDomElement e = element.firstChildElement(tag); !e.isNull(); e = e.nextSiblingElement(tag))
 		{
-			auto guard = Engine::audioEngine()->requestChangesGuard();
-			for (auto c = current.cbegin(); c != current.cend(); ++c)
-			{
-				if (!it.value().contains(c.key())) { writeNote(clip, c.key(), std::nullopt); }
-			}
-			for (auto b = it.value().cbegin(); b != it.value().cend(); ++b)
-			{
-				if (current.value(b.key()) != b.value() || !current.contains(b.key()))
-				{
-					writeNote(clip, b.key(), b.value());
-				}
-			}
-			clip->rearrangeAllNotes();
-			clip->updateLength();
+			for (const QString& a : WindowAttributes) { e.removeAttribute(a); }
 		}
-		emit clip->dataChanged();
+	}
+	const bool muted = sharedMute(track);
+	element.setAttribute("solo", 0);
+	element.setAttribute("muted", muted ? 1 : 0);
+	element.setAttribute("mutedBeforeSolo", muted ? 1 : 0);
+	return elementToString(element);
+}
+
+
+QString CollabSession::serialize(Clip* clip)
+{
+	QDomDocument doc;
+	QDomElement parent = doc.createElement("collab");
+	doc.appendChild(parent);
+	clip->saveState(doc, parent);
+	return elementToString(parent.firstChildElement());
+}
+
+
+Clip* CollabSession::createClipFromXml(Track* track, const QString& xml)
+{
+	QDomDocument doc;
+	if (!doc.setContent(xml)) { return nullptr; }
+	auto guard = Engine::audioEngine()->requestChangesGuard();
+	Clip* clip = track->createClip(TimePos{0});
+	clip->restoreState(doc.documentElement());
+	return clip;
+}
+
+
+void CollabSession::removeTrack(Track* track)
+{
+	// Same path as the Song Editor's "remove track", so its view and windows go away properly
+	if (auto gui = gui::getGUI(); gui && gui->songEditor())
+	{
+		auto editor = gui->songEditor()->m_editor;
+		for (gui::TrackView* view : editor->trackViews())
+		{
+			if (view->getTrack() == track)
+			{
+				editor->deleteTrackView(view);
+				return;
+			}
+		}
+	}
+	auto guard = Engine::audioEngine()->requestChangesGuard();
+	delete track;
+}
+
+
+void CollabSession::removeClip(Clip* clip)
+{
+	{
+		auto guard = Engine::audioEngine()->requestChangesGuard();
+		clip->getTrack()->removeClip(clip);
+	}
+	delete clip; // its views close themselves (destroyedClip)
+}
+
+
+void CollabSession::reorderTracks(const QList<collab_id_t>& order)
+{
+	Song* song = Engine::getSong();
+	auto indexOf = [song](const Track* t) {
+		const auto& tracks = song->tracks();
+		return static_cast<int>(std::find(tracks.begin(), tracks.end(), t) - tracks.begin());
+	};
+
+	std::vector<Track*> wanted;
+	for (const collab_id_t id : order)
+	{
+		Track* t = findTrack(id);
+		if (t && t->trackContainer() == song) { wanted.push_back(t); }
+	}
+	// The listed tracks take the positions they occupy now, in the wanted order; other tracks stay where they are
+	std::vector<int> positions;
+	for (Track* t : wanted) { positions.push_back(indexOf(t)); }
+	std::sort(positions.begin(), positions.end());
+
+	auto gui = gui::getGUI();
+	auto editor = gui && gui->songEditor() ? gui->songEditor()->m_editor : nullptr;
+	for (std::size_t k = 0; k < wanted.size(); ++k)
+	{
+		if (indexOf(wanted[k]) == positions[k]) { continue; }
+		gui::TrackView* view = nullptr;
+		if (editor)
+		{
+			for (gui::TrackView* v : editor->trackViews())
+			{
+				if (v->getTrack() == wanted[k]) { view = v; }
+			}
+		}
+		if (view) { editor->moveTrackView(view, positions[k]); }
+		else { song->moveTrack(wanted[k], positions[k]); }
+	}
+}
+
+
+CollabSession::Structure CollabSession::currentStructure() const
+{
+	Structure s;
+	for (Track* track : Engine::getSong()->tracks())
+	{
+		const collab_id_t id = track->collabId();
+		const int type = static_cast<int>(track->type());
+		if (!m_structure.tracks.contains(id) && !syncsStructure(type)) { continue; } // not shared (yet)
+		s.tracks.insert(id, trackFields(track));
+		s.trackTypes.insert(id, type);
+		if (takesPartInOrder(type)) { s.order.append(id); }
+		for (const Clip* clip : track->getClips())
+		{
+			if (dynamic_cast<const AutomationClip*>(clip)) { continue; } // automation comes later
+			s.clips.insert(clip->collabId(), Structure::ClipInfo{id, clipFields(clip)});
+		}
+	}
+	return s;
+}
+
+
+void CollabSession::flushStructure()
+{
+	if (m_state != State::Live) { return; }
+	const Structure current = currentStructure();
+	const qint64 ctx = m_nextCtx;
+	QJsonArray ops;
+
+	auto markPending = [&](char kind, collab_id_t id, const QJsonObject& fields) {
+		for (auto it = fields.begin(); it != fields.end(); ++it) { m_pendingStructure[pendingKey(kind, id, it.key())] = ctx; }
+	};
+	auto clipState = [](collab_id_t clipId, QJsonObject fields) {
+		// Clips carry a signature of their notes, so undo never removes a clip whose content changed
+		if (const MidiClip* clip = findMidiClip(clipId)) { fields.insert("_n", notesSignature(currentNotes(*clip))); }
+		return fields;
+	};
+
+	// New tracks are sent complete (instrument, settings and clips)
+	for (Track* track : Engine::getSong()->tracks())
+	{
+		const collab_id_t id = track->collabId();
+		if (current.tracks.contains(id) && !m_structure.tracks.contains(id))
+		{
+			ops.append(QJsonObject{{"op", proto::op::TrackAdd}, {"container", proto::SongContainer},
+				{"index", -1}, {"xml", serialize(track)}});
+		}
+	}
+
+	// New clips and clip changes (clips of new tracks were sent with their track)
+	for (auto it = current.clips.cbegin(); it != current.clips.cend(); ++it)
+	{
+		const collab_id_t clipId = it.key();
+		const collab_id_t trackId = it->track;
+		if (!m_structure.tracks.contains(trackId)) { continue; }
+		const auto old = m_structure.clips.constFind(clipId);
+		if (old == m_structure.clips.cend())
+		{
+			Clip* clip = findClip(clipId);
+			ops.append(QJsonObject{{"op", proto::op::ClipAdd}, {"track", proto::idString(trackId)},
+				{"xml", serialize(clip)}});
+			record(Kind::Clip, trackId, clipId, std::nullopt, clipState(clipId, it->fields));
+			continue;
+		}
+		const QJsonObject changed = changedFields(old->fields, it->fields);
+		if (changed.isEmpty()) { continue; }
+		ops.append(QJsonObject{{"op", proto::op::ClipSet}, {"id", proto::idString(clipId)}, {"v", changed}});
+		markPending('c', clipId, changed);
+		record(Kind::Clip, trackId, clipId, clipState(clipId, old->fields), clipState(clipId, it->fields));
+	}
+
+	// Removed clips (not the clips of removed tracks: removing the track removes them)
+	for (auto it = m_structure.clips.cbegin(); it != m_structure.clips.cend(); ++it)
+	{
+		if (current.clips.contains(it.key()) || !current.tracks.contains(it->track)) { continue; }
+		ops.append(QJsonObject{{"op", proto::op::ClipRemove}, {"id", proto::idString(it.key())}});
+		QJsonObject before = it->fields;
+		if (m_baselines.contains(it.key()))
+		{
+			// The clip is gone; its last synchronized notes stand for its content
+			before.insert("_n", notesSignature(m_baselines.value(it.key())));
+		}
+		record(Kind::Clip, it->track, it.key(), before, std::nullopt);
+	}
+
+	// Track changes
+	for (auto it = current.tracks.cbegin(); it != current.tracks.cend(); ++it)
+	{
+		const auto old = m_structure.tracks.constFind(it.key());
+		if (old == m_structure.tracks.cend()) { continue; }
+		const QJsonObject changed = changedFields(*old, *it);
+		if (changed.isEmpty()) { continue; }
+		ops.append(QJsonObject{{"op", proto::op::TrackSet}, {"id", proto::idString(it.key())}, {"v", changed}});
+		markPending('t', it.key(), changed);
+		record(Kind::Track, 0, it.key(), *old, *it);
+	}
+	for (auto it = m_structure.tracks.cbegin(); it != m_structure.tracks.cend(); ++it)
+	{
+		if (current.tracks.contains(it.key())) { continue; }
+		// A removed pattern or automation track cannot be shared yet; it just stops being shared
+		if (syncsStructure(m_structure.trackTypes.value(it.key())))
+		{
+			ops.append(QJsonObject{{"op", proto::op::TrackRemove}, {"id", proto::idString(it.key())}});
+		}
+	}
+
+	if (current.order != m_structure.order)
+	{
+		QJsonArray ids;
+		for (const collab_id_t id : current.order) { ids.append(proto::idString(id)); }
+		ops.append(QJsonObject{{"op", proto::op::TrackOrder}, {"container", proto::SongContainer}, {"ids", ids}});
+	}
+
+	m_structure = current;
+	syncNoteTracking();
+	if (!ops.isEmpty()) { sendOps(ops); }
+}
+
+
+void CollabSession::applyRemoteStructureOp(const QJsonObject& op)
+{
+	const QString type = op.value("op").toString();
+	Song* song = Engine::getSong();
+	auto without = [this](char kind, collab_id_t id, QJsonObject fields) {
+		for (const QString& key : fields.keys())
+		{
+			// our unacknowledged write of this field wins
+			if (m_pendingStructure.contains(pendingKey(kind, id, key))) { fields.remove(key); }
+		}
+		return fields;
+	};
+
+	m_applyingRemote = true;
+	if (type == proto::op::TrackAdd)
+	{
+		QDomDocument doc;
+		if (doc.setContent(op.value("xml").toString()) && !findTrack(proto::parseId(doc.documentElement().attribute("cid"))))
+		{
+			Track::create(doc.documentElement(), song);
+		}
+	}
+	else if (type == proto::op::TrackRemove)
+	{
+		Track* track = findTrack(proto::parseId(op.value("id")));
+		if (track && track->trackContainer() == song) { removeTrack(track); }
+	}
+	else if (type == proto::op::TrackSet)
+	{
+		const collab_id_t id = proto::parseId(op.value("id"));
+		if (Track* track = findTrack(id)) { applyTrackFields(track, without('t', id, op.value("v").toObject())); }
+	}
+	else if (type == proto::op::TrackOrder)
+	{
+		QList<collab_id_t> order;
+		for (const QJsonValue& v : op.value("ids").toArray()) { order.append(proto::parseId(v)); }
+		reorderTracks(order);
+	}
+	else if (type == proto::op::ClipAdd)
+	{
+		Track* track = findTrack(proto::parseId(op.value("track")));
+		QDomDocument doc;
+		if (track && doc.setContent(op.value("xml").toString())
+			&& !findClip(proto::parseId(doc.documentElement().attribute("cid"))))
+		{
+			createClipFromXml(track, op.value("xml").toString());
+		}
+	}
+	else if (type == proto::op::ClipRemove)
+	{
+		const collab_id_t id = proto::parseId(op.value("id"));
+		if (Clip* clip = findClip(id))
+		{
+			untrackClip(id);
+			removeClip(clip);
+		}
+	}
+	else if (type == proto::op::ClipSet)
+	{
+		const collab_id_t id = proto::parseId(op.value("id"));
+		if (Clip* clip = findClip(id)) { applyClipFields(clip, without('c', id, op.value("v").toObject())); }
 	}
 	m_applyingRemote = false;
 }
 
 
-void CollabSession::replayGesture(const Gesture& gesture, bool undo)
-{
-	MidiClip* clip = findClip(gesture.clip);
-	if (!clip) { return; }
+// ------------------------------------------------------------------------------------------------
+// Undo / redo (decision D4)
 
-	// "mine" is what this user left (or, for redo, what they had before undoing); "target" what to go back to
+bool CollabSession::isShared(JournallingObject* jo) const
+{
+	if (auto clip = dynamic_cast<Clip*>(jo))
+	{
+		return m_structure.clips.contains(clip->collabId()) || m_baselines.contains(clip->collabId());
+	}
+	if (auto track = dynamic_cast<Track*>(jo)) { return m_structure.tracks.contains(track->collabId()); }
+	return false;
+}
+
+
+std::uint64_t CollabSession::checkPointAdded(JournallingObject* jo)
+{
+	if (m_state != State::Live || !isShared(jo)) { return 0; }
+
+	// Changes made before this checkpoint belong to earlier gestures
+	flushAll();
+	const std::uint64_t token = m_nextGesture++;
+	Gesture& gesture = m_gestures[token];
+	if (auto clip = dynamic_cast<Clip*>(jo))
+	{
+		m_openGesture[{static_cast<int>(Kind::Clip), clip->collabId()}] = token;
+		gesture.clipXml.insert(clip->collabId(), serialize(clip));
+	}
+	else if (auto track = dynamic_cast<Track*>(jo))
+	{
+		m_openGesture[{static_cast<int>(Kind::Track), track->collabId()}] = token;
+		for (Clip* clip : track->getClips())
+		{
+			// The track's gesture now collects the changes of all its clips (e.g. moving a selection)
+			m_openGesture.remove({static_cast<int>(Kind::Clip), clip->collabId()});
+			gesture.clipXml.insert(clip->collabId(), serialize(clip));
+		}
+	}
+	while (m_gestures.size() > 1000) { m_gestures.erase(m_gestures.begin()); } // the journal keeps 100 anyway
+	return token;
+}
+
+
+bool CollabSession::restore(JournallingObject* jo, std::uint64_t token, bool undo)
+{
+	if (m_state != State::Live || !isShared(jo)) { return false; }
+	// Never restore an old snapshot of a shared object: it would also revert other users' changes.
+	flushAll();
+	if (const auto g = m_gestures.find(token); token != 0 && g != m_gestures.end())
+	{
+		for (auto it = m_openGesture.begin(); it != m_openGesture.end();)
+		{
+			it = it.value() == token ? m_openGesture.erase(it) : std::next(it);
+		}
+		replayGesture(g->second, undo);
+	}
+	return true;
+}
+
+
+void CollabSession::restored(JournallingObject*)
+{
+	// A snapshot of something that is not shared was restored; changes to shared objects, if any, are
+	// picked up by the regular comparison with the baselines.
+}
+
+
+CollabSession::Gesture* CollabSession::openGestureFor(Kind kind, collab_id_t parent, collab_id_t id)
+{
+	auto find = [this](Kind k, collab_id_t objectId) -> Gesture* {
+		const auto open = m_openGesture.constFind({static_cast<int>(k), objectId});
+		if (open == m_openGesture.cend()) { return nullptr; }
+		const auto g = m_gestures.find(*open);
+		return g != m_gestures.end() ? &g->second : nullptr;
+	};
+	switch (kind)
+	{
+	case Kind::Track: return find(Kind::Track, id);
+	case Kind::Clip:
+		if (Gesture* g = find(Kind::Clip, id)) { return g; }
+		return find(Kind::Track, parent);
+	case Kind::Note:
+		if (Gesture* g = find(Kind::Clip, parent)) { return g; }
+		if (const Clip* clip = findClip(parent)) { return find(Kind::Track, clip->getTrack()->collabId()); }
+		return nullptr;
+	}
+	return nullptr;
+}
+
+
+void CollabSession::record(Kind kind, collab_id_t parent, collab_id_t id, const ObjectState& before,
+	const ObjectState& after)
+{
+	if (!m_recordGestures) { return; }
+	Gesture* gesture = openGestureFor(kind, parent, id);
+	if (!gesture) { return; }
+	const ObjectKey key{kind, parent, id};
+	if (!gesture->before.contains(key)) { gesture->before.insert(key, before); }
+	gesture->after.insert(key, after);
+}
+
+
+QString CollabSession::notesSignature(const NoteMap& notes)
+{
+	QList<collab_id_t> ids = notes.keys();
+	std::sort(ids.begin(), ids.end());
+	QString signature;
+	for (const collab_id_t id : ids)
+	{
+		signature += proto::idString(id);
+		for (const int v : notes.value(id).fields) { signature += QString::number(v) + ','; }
+	}
+	return signature;
+}
+
+
+CollabSession::ObjectState CollabSession::currentState(const ObjectKey& key) const
+{
+	switch (key.kind)
+	{
+	case Kind::Track:
+		if (const Track* track = findTrack(key.id)) { return trackFields(track); }
+		return std::nullopt;
+	case Kind::Clip:
+		if (const Clip* clip = findClip(key.id))
+		{
+			QJsonObject fields = clipFields(clip);
+			if (auto midiClip = dynamic_cast<const MidiClip*>(clip))
+			{
+				fields.insert("_n", notesSignature(currentNotes(*midiClip)));
+			}
+			return fields;
+		}
+		return std::nullopt;
+	case Kind::Note:
+		if (const MidiClip* clip = findMidiClip(key.parent))
+		{
+			if (const Note* note = clip->findNote(key.id)) { return NoteState::of(*note).toJson(); }
+		}
+		return std::nullopt;
+	}
+	return std::nullopt;
+}
+
+
+void CollabSession::replayGesture(Gesture& gesture, bool undo)
+{
+	// "mine" is what this user left (for redo: what they had before undoing); "target" what to go back to
 	const auto& mineStates = undo ? gesture.after : gesture.before;
 	const auto& targetStates = undo ? gesture.before : gesture.after;
-	bool changed = false;
+	QSet<MidiClip*> touchedClips;
+
 	{
 		auto guard = Engine::audioEngine()->requestChangesGuard();
-		for (auto it = mineStates.cbegin(); it != mineStates.cend(); ++it)
+		// Clips before notes: a note can only come back into a clip that exists
+		for (const Kind kind : {Kind::Track, Kind::Clip, Kind::Note})
 		{
-			const collab_id_t id = it.key();
-			const std::optional<NoteState>& mine = it.value();
-			const std::optional<NoteState> target = targetStates.value(id);
-			if (mine == target) { continue; }
+			for (auto it = mineStates.cbegin(); it != mineStates.cend(); ++it)
+			{
+				const ObjectKey& key = it.key();
+				if (key.kind != kind) { continue; }
+				const ObjectState& mine = it.value();
+				const ObjectState target = targetStates.value(key);
+				if (mine == target) { continue; }
+				const ObjectState current = currentState(key);
 
-			const Note* note = clip->findNote(id);
-			const std::optional<NoteState> current = note ? std::optional{NoteState::of(*note)} : std::nullopt;
-
-			if (!mine)
-			{
-				// This user removed the note: bring it back, unless it exists again by now
-				if (!current) { writeNote(clip, id, target); changed = true; }
-			}
-			else if (!target)
-			{
-				// This user created the note: remove it only if nobody changed it since
-				if (current == mine) { writeNote(clip, id, std::nullopt); changed = true; }
-			}
-			else if (current)
-			{
-				// Revert each field this user changed, unless someone changed that field afterwards
-				NoteState next = *current;
-				bool any = false;
-				for (int f = 0; f < NoteValues::FieldCount; ++f)
+				if (!mine)
 				{
-					if (mine->fields[f] != target->fields[f] && current->fields[f] == mine->fields[f])
+					// This user removed it: bring it back, unless it exists again by now
+					if (current || !target) { continue; }
+					if (key.kind == Kind::Clip)
 					{
-						next.fields[f] = target->fields[f];
-						any = true;
+						Track* track = findTrack(key.parent);
+						const QString xml = gesture.clipXml.value(key.id);
+						if (!track || xml.isEmpty()) { continue; }
+						if (Clip* clip = createClipFromXml(track, xml))
+						{
+							applyClipFields(clip, withoutPrivateKeys(*target));
+						}
+					}
+					else if (key.kind == Kind::Note)
+					{
+						if (MidiClip* clip = findMidiClip(key.parent))
+						{
+							writeNote(clip, key.id, NoteState::fromJson(*target));
+							touchedClips.insert(clip);
+						}
 					}
 				}
-				if (any) { writeNote(clip, id, next); changed = true; }
+				else if (!target)
+				{
+					// This user created it: remove it only if nobody changed it since
+					if (current != mine) { continue; }
+					if (key.kind == Kind::Clip)
+					{
+						if (Clip* clip = findClip(key.id))
+						{
+							gesture.clipXml.insert(key.id, serialize(clip)); // for redo
+							untrackClip(key.id);
+							removeClip(clip);
+						}
+					}
+					else if (key.kind == Kind::Note)
+					{
+						if (MidiClip* clip = findMidiClip(key.parent))
+						{
+							writeNote(clip, key.id, std::nullopt);
+							touchedClips.insert(clip);
+						}
+					}
+				}
+				else if (current)
+				{
+					// Revert each field this user changed, unless someone changed that field afterwards
+					QJsonObject revert;
+					for (auto f = mine->begin(); f != mine->end(); ++f)
+					{
+						if (f.key().startsWith('_')) { continue; }
+						if (f.value() != target->value(f.key()) && current->value(f.key()) == f.value())
+						{
+							revert.insert(f.key(), target->value(f.key()));
+						}
+					}
+					if (revert.isEmpty()) { continue; }
+					if (key.kind == Kind::Track) { applyTrackFields(findTrack(key.id), revert); }
+					else if (key.kind == Kind::Clip) { applyClipFields(findClip(key.id), revert); }
+					else if (MidiClip* clip = findMidiClip(key.parent))
+					{
+						QJsonObject next = *current;
+						for (auto f = revert.begin(); f != revert.end(); ++f) { next.insert(f.key(), f.value()); }
+						writeNote(clip, key.id, NoteState::fromJson(next));
+						touchedClips.insert(clip);
+					}
+				}
+				// else: someone else removed it meanwhile; leave it removed
 			}
-			// else: someone else removed the note meanwhile; leave it removed
 		}
-		if (changed)
+		for (MidiClip* clip : touchedClips)
 		{
 			clip->rearrangeAllNotes();
 			clip->updateLength();
 		}
 	}
-	if (changed) { emit clip->dataChanged(); }
+	for (MidiClip* clip : touchedClips) { emit clip->dataChanged(); }
 
 	// Send the result right away; it is the undo itself, not a new gesture to record
 	m_recordGestures = false;
-	flushClip(clip);
+	flushAll();
 	m_recordGestures = true;
 }
 
 
-MidiClip* CollabSession::findClip(collab_id_t clipId)
+// ------------------------------------------------------------------------------------------------
+
+Clip* CollabSession::findClip(collab_id_t clipId)
 {
-	const auto owner = static_cast<const Clip*>(findOwner(IdScope::Clip, clipId));
-	return dynamic_cast<MidiClip*>(const_cast<Clip*>(owner));
+	return const_cast<Clip*>(static_cast<const Clip*>(findOwner(IdScope::Clip, clipId)));
 }
 
 
-void CollabSession::applyRemoteOps(collab_id_t clipId, const QJsonArray& ops)
+MidiClip* CollabSession::findMidiClip(collab_id_t clipId)
 {
-	if (!m_baselines.contains(clipId)) { return; } // not a shared clip
-	MidiClip* clip = findClip(clipId);
-	if (clip && m_trackers.find(clip) == m_trackers.end()) { clip = nullptr; }
+	return dynamic_cast<MidiClip*>(findClip(clipId));
+}
 
-	// Send our own unsent edits of this clip first, so the baseline only holds synchronized state
-	if (clip) { flushClip(clip); }
 
-	NoteMap& baseline = m_baselines[clipId];
-	bool changed = false;
-	m_applyingRemote = true;
-	{
-		auto guard = Engine::audioEngine()->requestChangesGuard();
-		for (const QJsonValue& value : ops)
-		{
-			const QJsonObject op = value.toObject();
-			const QString type = op.value("op").toString();
-			const collab_id_t noteId = proto::parseId(op.value("id"));
-			Note* note = clip ? clip->findNote(noteId) : nullptr;
-
-			if (type == proto::op::NoteRemove)
-			{
-				baseline.remove(noteId);
-				m_pending.remove({clipId, noteId});
-				if (note) { clip->removeNote(note); changed = true; }
-				continue;
-			}
-
-			const auto values = NoteValues::fromJson(op.value("v").toObject());
-			if (!values) { continue; }
-			const PendingFields pending = m_pending.value({clipId, noteId});
-
-			if (type == proto::op::NoteAdd && !note && values->isComplete())
-			{
-				if (clip)
-				{
-					Note n{TimePos{*(*values)[NoteValues::Len]}, TimePos{*(*values)[NoteValues::Pos]},
-						*(*values)[NoteValues::Key], static_cast<volume_t>(*(*values)[NoteValues::Vol]),
-						static_cast<panning_t>(*(*values)[NoteValues::Pan])};
-					n.setType(static_cast<Note::Type>(*(*values)[NoteValues::Type]));
-					note = clip->addNote(n, false, noteId);
-					changed = true;
-				}
-				else
-				{
-					NoteState s;
-					for (int f = 0; f < NoteValues::FieldCount; ++f) { s.fields[f] = *values->fields[f]; }
-					baseline.insert(noteId, s);
-				}
-			}
-			else if (type == proto::op::NoteAdd || type == proto::op::NoteSet)
-			{
-				for (int f = 0; f < NoteValues::FieldCount; ++f)
-				{
-					const auto& v = values->fields[f];
-					if (!v || pending[f] != 0) { continue; } // our unacknowledged write wins
-					if (note)
-					{
-						switch (f)
-						{
-						case NoteValues::Key: note->setKey(*v); break;
-						case NoteValues::Pos: note->setPos(TimePos{*v}); break;
-						case NoteValues::Len: note->setLength(TimePos{*v}); break;
-						case NoteValues::Vol: note->setVolume(static_cast<volume_t>(*v)); break;
-						case NoteValues::Pan: note->setPanning(static_cast<panning_t>(*v)); break;
-						case NoteValues::Type: note->setType(static_cast<Note::Type>(*v)); break;
-						}
-						changed = true;
-					}
-					else if (baseline.contains(noteId))
-					{
-						baseline[noteId].fields[f] = *v;
-					}
-				}
-			}
-			if (note) { baseline.insert(noteId, NoteState::of(*note)); }
-		}
-		if (clip && changed)
-		{
-			clip->rearrangeAllNotes();
-			clip->updateLength();
-		}
-	}
-	if (clip && changed)
-	{
-		emit clip->dataChanged();
-		Engine::getSong()->setModified();
-	}
-	m_applyingRemote = false;
+Track* CollabSession::findTrack(collab_id_t trackId)
+{
+	return const_cast<Track*>(static_cast<const Track*>(findOwner(IdScope::Track, trackId)));
 }
 
 } // namespace lmms::collab

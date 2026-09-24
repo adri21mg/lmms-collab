@@ -247,6 +247,17 @@ Note* MidiClip::findNote(collab_id_t id) const
 
 
 
+void MidiClip::setStepCount(int steps)
+{
+	if (steps < 1 || steps == m_steps) { return; }
+	m_steps = steps;
+	updateLength();
+	emit dataChanged();
+}
+
+
+
+
 collab_id_t MidiClip::freshNoteId() const
 {
 	collab_id_t id = collab::newId();
