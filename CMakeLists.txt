@@ -275,7 +275,7 @@ else()
 	set(STATUS_QT6 "Disabled")
 endif()
 
-find_package(Qt${QT_VERSION_MAJOR} ${LMMS_QT_MIN_VERSION} COMPONENTS Core Gui Widgets Xml Svg REQUIRED)
+find_package(Qt${QT_VERSION_MAJOR} ${LMMS_QT_MIN_VERSION} COMPONENTS Core Gui Widgets Xml Svg Network REQUIRED)
 find_package(Qt${QT_VERSION_MAJOR} COMPONENTS LinguistTools QUIET)
 
 message(STATUS "Using Qt version: ${Qt${QT_VERSION_MAJOR}_VERSION}")
@@ -293,6 +293,7 @@ set(QT_LIBRARIES
 	Qt${QT_VERSION_MAJOR}::Widgets
 	Qt${QT_VERSION_MAJOR}::Xml
 	Qt${QT_VERSION_MAJOR}::Svg
+	Qt${QT_VERSION_MAJOR}::Network
 )
 
 IF(LMMS_BUILD_LINUX AND WANT_VST AND NOT WANT_QT6)
@@ -823,6 +824,7 @@ include(CompileCache)
 
 # make sub-directories
 ADD_SUBDIRECTORY(cmake)
+ADD_SUBDIRECTORY(collab)
 ADD_SUBDIRECTORY(src)
 ADD_SUBDIRECTORY(plugins)
 ADD_SUBDIRECTORY(tests)

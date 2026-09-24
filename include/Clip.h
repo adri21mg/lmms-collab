@@ -30,6 +30,7 @@
 #include <QColor>
 
 #include "AutomatableModel.h"
+#include "CollabId.h"
 
 
 namespace lmms
@@ -158,6 +159,13 @@ public:
 public slots:
 	void toggleMute(); //!< Mutes this Clip
 
+public:
+	//! Collaboration id, unique among all live clips
+	collab_id_t collabId() const { return m_collabId; }
+
+	QDomElement saveState(QDomDocument& doc, QDomElement& parent) override;
+	void restoreState(const QDomElement& element) override;
+
 signals:
 	void lengthChanged();
 	void positionChanged();
@@ -185,6 +193,8 @@ private:
 	bool m_selectViewOnCreate;
 
 	std::optional<QColor> m_color;
+
+	collab_id_t m_collabId = 0;
 
 	friend class ClipView;
 };

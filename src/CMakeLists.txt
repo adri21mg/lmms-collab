@@ -28,6 +28,7 @@ IF(LMMS_BUILD_APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 	SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
 ENDIF()
 
+ADD_SUBDIRECTORY(collab)
 ADD_SUBDIRECTORY(common)
 ADD_SUBDIRECTORY(core)
 ADD_SUBDIRECTORY(gui)
@@ -192,7 +193,7 @@ SET(LMMS_REQUIRED_LIBS ${LMMS_REQUIRED_LIBS}
 target_link_libraries(lmmsobjs
 	${LMMS_REQUIRED_LIBS}
 )
-target_static_libraries(lmmsobjs ringbuffer)
+target_static_libraries(lmmsobjs ringbuffer collabprotocol)
 
 set_target_properties(lmms PROPERTIES
 	ENABLE_EXPORTS ON

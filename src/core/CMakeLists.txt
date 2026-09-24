@@ -14,6 +14,7 @@ set(LMMS_SRCS
 	core/base64.cpp
 	core/BufferManager.cpp
 	core/Clipboard.cpp
+	core/CollabId.cpp
 	core/ComboBoxModel.cpp
 	core/ConfigManager.cpp
 	core/Controller.cpp

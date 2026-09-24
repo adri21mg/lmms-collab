@@ -30,6 +30,7 @@
 #include <QColor>
 
 #include "AutomatableModel.h"
+#include "CollabId.h"
 #include "JournallingObject.h"
 #include "LmmsTypes.h"
 #include <optional>
@@ -108,6 +109,9 @@ public:
 
 	//! @brief Clone a track from this track
 	Track * clone();
+
+	//! Collaboration id, unique among all live tracks
+	collab_id_t collabId() const { return m_collabId; }
 
 
 	// pure virtual functions
@@ -321,6 +325,8 @@ private:
 	QMutex m_processingLock;
 	
 	std::optional<QColor> m_color;
+
+	collab_id_t m_collabId = 0;
 
 	friend class gui::TrackView;
 

@@ -25,6 +25,8 @@
 #ifndef LMMS_PROJECT_JOURNAL_H
 #define LMMS_PROJECT_JOURNAL_H
 
+#include <cstdint>
+
 #include <QHash>
 #include <QStack>
 
@@ -39,11 +41,28 @@ namespace lmms
 class JournallingObject;
 
 
+//! Lets collaborative editing take part in undo/redo without the journal depending on it
+class JournalHook
+{
+public:
+	virtual ~JournalHook() = default;
+	//! Called when a checkpoint is recorded for @p jo; the returned token is kept with the checkpoint
+	virtual std::uint64_t checkPointAdded(JournallingObject* jo) = 0;
+	//! Called right before an undo or redo restores @p jo from its checkpoint
+	virtual void beforeRestore(JournallingObject* jo) = 0;
+	//! Called after the restore, with the token of the checkpoint that was undone or redone
+	virtual void afterRestore(JournallingObject* jo, std::uint64_t token, bool undo) = 0;
+};
+
+
 //! @warning many parts of this class may be rewritten soon
 class ProjectJournal
 {
 public:
 	static const int MAX_UNDO_STATES;
+
+	//! At most one hook; nullptr removes it
+	static void setHook(JournalHook* hook);
 
 	ProjectJournal();
 	virtual ~ProjectJournal() = default;
@@ -104,13 +123,16 @@ private:
 
 	struct CheckPoint
 	{
-		CheckPoint( jo_id_t initID = 0, const DataFile& initData = DataFile( DataFile::Type::JournalData ) ) :
+		CheckPoint( jo_id_t initID = 0, const DataFile& initData = DataFile( DataFile::Type::JournalData ),
+				std::uint64_t initHookToken = 0 ) :
 			joID( initID ),
-			data( initData )
+			data( initData ),
+			hookToken( initHookToken )
 		{
 		}
 		jo_id_t joID;
 		DataFile data;
+		std::uint64_t hookToken; //!< from JournalHook::checkPointAdded(), 0 if none
 	} ;
 	using CheckPointStack = QStack<CheckPoint>;
 

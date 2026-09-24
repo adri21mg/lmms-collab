@@ -37,6 +37,7 @@
 
 #include "AboutDialog.h"
 #include "AutomationEditor.h"
+#include "CollabMenu.h"
 #include "ControllerRackView.h"
 #include "DeprecationHelper.h"
 #include "embed.h"
@@ -366,6 +367,8 @@ void MainWindow::finalize()
 					this, SLOT(showTool(QAction*)));
 	}
 
+
+	menuBar()->addMenu(new CollabMenu(this));
 
 	// help-popup-menu
 	auto help_menu = new QMenu(this);

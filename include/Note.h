@@ -32,6 +32,7 @@
 
 #include "volume.h"
 #include "panning.h"
+#include "CollabId.h"
 #include "SerializingObject.h"
 #include "TimePos.h"
 
@@ -236,6 +237,10 @@ public:
 		return m_panning;
 	}
 
+	//! Collaboration id, unique within the owning MidiClip (0 if the note is not in a clip)
+	collab_id_t collabId() const { return m_collabId; }
+	void setCollabId(collab_id_t id) { m_collabId = id; }
+
 	static QString classNodeName()
 	{
 		return "note";
@@ -277,6 +282,8 @@ private:
 	std::shared_ptr<DetuningHelper> m_detuning;
 
 	Type m_type = Type::Regular;
+
+	collab_id_t m_collabId = 0;
 };
 
 using NoteVector = std::vector<Note*>;

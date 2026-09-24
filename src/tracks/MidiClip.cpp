@@ -177,9 +177,11 @@ TimePos MidiClip::beatClipLength() const
 
 
 
-Note * MidiClip::addNote( const Note & _new_note, const bool _quant_pos )
+Note * MidiClip::addNote( const Note & _new_note, const bool _quant_pos, collab_id_t collabId )
 {
 	auto new_note = _new_note.clone();
+	// A new identity unless one is requested: the source may be a copy of a note that is still in this clip
+	new_note->setCollabId(collabId != 0 && !findNote(collabId) ? collabId : freshNoteId());
 	if (_quant_pos && gui::getGUI()->pianoRoll())
 	{
 		new_note->quantizePos(gui::getGUI()->pianoRoll()->quantization());
@@ -236,6 +238,25 @@ NoteVector::const_iterator MidiClip::removeNote(Note* note)
 
 
 // Returns a pointer to the note at specified step, or nullptr if note doesn't exist
+Note* MidiClip::findNote(collab_id_t id) const
+{
+	const auto it = std::find_if(m_notes.begin(), m_notes.end(), [id](const Note* n) { return n->collabId() == id; });
+	return it != m_notes.end() ? *it : nullptr;
+}
+
+
+
+
+collab_id_t MidiClip::freshNoteId() const
+{
+	collab_id_t id = collab::newId();
+	while (findNote(id) != nullptr) { id = collab::newId(); }
+	return id;
+}
+
+
+
+
 Note * MidiClip::noteAtStep(int step)
 {
 	for (const auto& note : m_notes)
@@ -500,6 +521,11 @@ void MidiClip::loadSettings( const QDomElement & _this )
 		{
 			auto n = new Note;
 			n->restoreState( node.toElement() );
+			// Keep saved ids (so undo and reloading preserve identity), but repair missing or duplicated ones
+			if (n->collabId() == 0 || findNote(n->collabId()) != nullptr)
+			{
+				n->setCollabId(freshNoteId());
+			}
 			m_notes.push_back( n );
 		}
 		node = node.nextSibling();

@@ -41,6 +41,13 @@ static const int EO_ID_MSB = 1 << 23;
 
 const int ProjectJournal::MAX_UNDO_STATES = 100; // TODO: make this configurable in settings
 
+static JournalHook* s_hook = nullptr;
+
+void ProjectJournal::setHook(JournalHook* hook)
+{
+	s_hook = hook;
+}
+
 ProjectJournal::ProjectJournal() :
 	m_joIDs(),
 	m_undoCheckPoints(),
@@ -61,13 +68,16 @@ void ProjectJournal::undo()
 
 		if( jo )
 		{
+			if (s_hook) { s_hook->beforeRestore(jo); }
+
 			DataFile curState( DataFile::Type::JournalData );
 			jo->saveState( curState, curState.content() );
-			m_redoCheckPoints.push( CheckPoint( c.joID, curState ) );
+			m_redoCheckPoints.push( CheckPoint( c.joID, curState, c.hookToken ) );
 
 			bool prev = isJournalling();
 			setJournalling( false );
 			jo->restoreState( c.data.content().firstChildElement() );
+			if (s_hook) { s_hook->afterRestore(jo, c.hookToken, true); }
 			setJournalling( prev );
 			Engine::getSong()->setModified();
 
@@ -92,13 +102,16 @@ void ProjectJournal::redo()
 
 		if( jo )
 		{
+			if (s_hook) { s_hook->beforeRestore(jo); }
+
 			DataFile curState( DataFile::Type::JournalData );
 			jo->saveState( curState, curState.content() );
-			m_undoCheckPoints.push( CheckPoint( c.joID, curState ) );
+			m_undoCheckPoints.push( CheckPoint( c.joID, curState, c.hookToken ) );
 
 			bool prev = isJournalling();
 			setJournalling( false );
 			jo->restoreState( c.data.content().firstChildElement() );
+			if (s_hook) { s_hook->afterRestore(jo, c.hookToken, false); }
 			setJournalling( prev );
 			Engine::getSong()->setModified();
 			break;
@@ -127,7 +140,7 @@ void ProjectJournal::addJournalCheckPoint( JournallingObject *jo )
 		DataFile dataFile( DataFile::Type::JournalData );
 		jo->saveState( dataFile, dataFile.content() );
 
-		m_undoCheckPoints.push( CheckPoint( jo->id(), dataFile ) );
+		m_undoCheckPoints.push( CheckPoint( jo->id(), dataFile, s_hook ? s_hook->checkPointAdded(jo) : 0 ) );
 		if( m_undoCheckPoints.size() > MAX_UNDO_STATES )
 		{
 			m_undoCheckPoints.remove( 0, m_undoCheckPoints.size() - MAX_UNDO_STATES );

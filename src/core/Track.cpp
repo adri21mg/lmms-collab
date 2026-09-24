@@ -54,7 +54,8 @@ Track::Track(Type type, TrackContainer* tc)
 	, m_mutedModel(false, this, tr("Mute"))
 	, m_soloModel(false, this, tr("Solo"))
 	, m_clips()
-{	
+	, m_collabId(collab::claimId(collab::IdScope::Track, 0, this))
+{
 	m_trackContainer->addTrack( this );
 	m_height = -1;
 }
@@ -74,6 +75,8 @@ Track::~Track()
 
 	m_trackContainer->removeTrack( this );
 	unlock();
+
+	collab::releaseId(collab::IdScope::Track, m_collabId, this);
 }
 
 
@@ -151,6 +154,7 @@ void Track::saveTrack(QDomDocument& doc, QDomElement& element, bool presetMode)
 	if (!presetMode)
 	{
 		element.setTagName( "track" );
+		element.setAttribute(collab::IdAttribute, collab::idToString(m_collabId));
 	}
 	element.setAttribute( "type", static_cast<int>(type()) );
 	element.setAttribute( "name", name() );
@@ -193,6 +197,17 @@ void Track::loadTrack(const QDomElement& element, bool presetMode)
 	{
 		qWarning( "Current track-type does not match track-type of "
 							"settings-node!\n" );
+	}
+
+	if (!presetMode)
+	{
+		// Adopt the saved id unless another live track already owns it (e.g. when cloning a track)
+		const collab_id_t savedId = collab::idFromString(element.attribute(collab::IdAttribute));
+		if (savedId != 0 && savedId != m_collabId && !collab::findOwner(collab::IdScope::Track, savedId))
+		{
+			collab::releaseId(collab::IdScope::Track, m_collabId, this);
+			m_collabId = collab::claimId(collab::IdScope::Track, savedId, this);
+		}
 	}
 
 	setName( element.hasAttribute( "name" ) ? element.attribute( "name" ) :

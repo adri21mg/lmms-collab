@@ -60,12 +60,16 @@ public:
 	void updateLength() override;
 
 	// note management
-	Note * addNote( const Note & _new_note, const bool _quant_pos = true );
+	//! Adds a copy of the note with a new collaboration id, or with @p collabId if it is non-zero and not
+	//! used in this clip yet (used when applying a note that was created by another collaborator)
+	Note * addNote( const Note & _new_note, const bool _quant_pos = true, collab_id_t collabId = 0 );
 
 	NoteVector::const_iterator removeNote(NoteVector::const_iterator it);
 	NoteVector::const_iterator removeNote(Note* note);
 
 	Note * noteAtStep( int _step );
+	//! Note with the given collaboration id, or nullptr
+	Note* findNote(collab_id_t id) const;
 
 	void rearrangeAllNotes();
 	void clearNotes();
@@ -156,6 +160,8 @@ private:
 	int m_steps;
 
 	MidiClip * adjacentMidiClipByOffset(int offset) const;
+	//! Random note id not used by any note of this clip
+	collab_id_t freshNoteId() const;
 
 	friend class gui::MidiClipView;
 

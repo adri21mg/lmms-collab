@@ -7,6 +7,8 @@ set(LMMS_TESTS
 	src/core/ArrayVectorTest.cpp
 	src/core/AudioBufferTest.cpp
 	src/core/AutomatableModelTest.cpp
+	src/core/CollabIdTest.cpp
+	src/core/CollabSessionTest.cpp
 	src/core/MathTest.cpp
 	src/core/ProjectVersionTest.cpp
 	src/core/RelativePathsTest.cpp
@@ -33,3 +35,7 @@ foreach(LMMS_TEST_SRC IN LISTS LMMS_TESTS)
 	target_compile_features(${LMMS_TEST_NAME} PRIVATE cxx_std_20)
 	target_compile_definitions(${LMMS_TEST_NAME} PRIVATE LMMS_TESTING)
 endforeach()
+
+# The collaboration end-to-end test starts the real server
+add_dependencies(CollabSessionTest lmms-collab-server)
+target_compile_definitions(CollabSessionTest PRIVATE COLLAB_SERVER_EXE="$<TARGET_FILE:lmms-collab-server>")

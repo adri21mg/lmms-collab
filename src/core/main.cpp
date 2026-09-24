@@ -171,6 +171,8 @@ void printHelp()
 		"  makebundle <in> [out]                 Make a project bundle from the project\n"
 		"                                        file <in> saving the resulting bundle\n"
 		"                                        as <out>\n"
+		"  resave <in> <out>                     Load project <in> without GUI and save\n"
+		"                                        it as <out> (regression testing)\n"
 		"\nGlobal options:\n"
 		"      --allowroot                Bypass root user startup check (use with\n"
 		"          caution).\n"
@@ -253,7 +255,7 @@ int main( int argc, char * * argv )
 	bool allowRoot = false;
 	bool renderLoop = false;
 	bool renderTracks = false;
-	QString fileToLoad, fileToImport, renderOut, profilerOutputFile, configFile;
+	QString fileToLoad, fileToImport, renderOut, profilerOutputFile, configFile, resaveOut;
 
 	// first of two command-line parsing stages
 	for (int i = 1; i < argc; ++i)
@@ -278,6 +280,10 @@ int main( int argc, char * * argv )
 		{
 			coreOnly = true;
 			renderTracks = true;
+		}
+		else if (arg == "resave")
+		{
+			coreOnly = true;
 		}
 		else if (arg == "--allowroot")
 		{
@@ -401,6 +407,12 @@ int main( int argc, char * * argv )
 			}
 
 			return EXIT_SUCCESS;
+		}
+		else if (arg == "resave")
+		{
+			if (i + 2 >= argc) { return usageError("resave needs <in> and <out>"); }
+			fileToLoad = QString::fromLocal8Bit(argv[++i]);
+			resaveOut = QString::fromLocal8Bit(argv[++i]);
 		}
 		else if (arg == "makebundle")
 		{
@@ -704,6 +716,17 @@ int main( int argc, char * * argv )
 #endif
 
 	bool destroyEngine = false;
+
+	// Load the project into the real model without GUI and save it again (unlike "upgrade",
+	// which only transforms the XML). Used for regression checks of project serialization.
+	if (!resaveOut.isEmpty())
+	{
+		Engine::init(true);
+		Engine::getSong()->loadProject(fileToLoad);
+		const bool saved = Engine::getSong()->saveProjectFile(resaveOut);
+		Engine::destroy();
+		return saved ? EXIT_SUCCESS : EXIT_FAILURE;
+	}
 
 	// if we have an output file for rendering, just render the song
 	// without starting the GUI

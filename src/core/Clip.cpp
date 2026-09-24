@@ -44,7 +44,8 @@ Clip::Clip( Track * track ) :
 	m_startPosition(),
 	m_length(),
 	m_mutedModel( false, this, tr( "Mute" ) ),
-	m_selectViewOnCreate{false}
+	m_selectViewOnCreate{false},
+	m_collabId(collab::claimId(collab::IdScope::Clip, 0, this))
 {
 	if( getTrack() )
 	{
@@ -67,7 +68,8 @@ Clip::Clip(const Clip& other):
 	m_mutedModel(other.m_mutedModel.value(), this, tr( "Mute" )),
 	m_autoResize(other.m_autoResize),
 	m_selectViewOnCreate{other.m_selectViewOnCreate},
-	m_color(other.m_color)
+	m_color(other.m_color),
+	m_collabId(collab::claimId(collab::IdScope::Clip, 0, this)) // a copy is a new clip
 {
 	if (getTrack())
 	{
@@ -79,11 +81,36 @@ Clip::Clip(const Clip& other):
 Clip::~Clip()
 {
 	emit destroyedClip();
+	collab::releaseId(collab::IdScope::Clip, m_collabId, this);
 
 	if( getTrack() )
 	{
 		getTrack()->removeClip( this );
 	}
+}
+
+
+QDomElement Clip::saveState(QDomDocument& doc, QDomElement& parent)
+{
+	QDomElement element = JournallingObject::saveState(doc, parent);
+	if (!element.isNull())
+	{
+		element.setAttribute(collab::IdAttribute, collab::idToString(m_collabId));
+	}
+	return element;
+}
+
+
+void Clip::restoreState(const QDomElement& element)
+{
+	// Adopt the saved id unless another live clip already owns it (e.g. when pasting a copy)
+	const collab_id_t savedId = collab::idFromString(element.attribute(collab::IdAttribute));
+	if (savedId != 0 && savedId != m_collabId && !collab::findOwner(collab::IdScope::Clip, savedId))
+	{
+		collab::releaseId(collab::IdScope::Clip, m_collabId, this);
+		m_collabId = collab::claimId(collab::IdScope::Clip, savedId, this);
+	}
+	JournallingObject::restoreState(element);
 }
 
 
