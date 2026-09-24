@@ -25,7 +25,6 @@
 #include "ProjectState.h"
 
 #include <algorithm>
-#include <vector>
 
 #include <QJsonArray>
 
@@ -41,7 +40,7 @@ namespace
 const QStringList PrivateSongElements = {"pianoroll", "automationeditor", "ControllerRackView", "timeline"};
 //! Window geometry LMMS stores on some elements (e.g. the instrument window inside <instrumenttrack>)
 const QStringList WindowAttributes = {"x", "y", "width", "height", "visible", "maximized", "minimized", "tab"};
-const QStringList WindowStateElements = {"trackcontainer", "instrumenttrack", "sampletrack"};
+const QStringList WindowStateElements = {"trackcontainer", "instrumenttrack", "sampletrack", "projectnotes"};
 
 // Track types (Track::Type) and the clip element each one holds
 constexpr int InstrumentTrack = 0;
@@ -64,11 +63,22 @@ bool isClipTag(const QString& tag)
 	return tag == "midiclip" || tag == "patternclip" || tag == "sampleclip" || tag == "automationclip";
 }
 
+bool isContentTrackType(int type)
+{
+	return type == InstrumentTrack || type == SampleTrack;
+}
+
 using proto::NoteValues;
+using Id = std::uint64_t;
 
 int noteAttr(const QDomElement& note, NoteValues::Field f)
 {
 	return note.attribute(NoteValues::FieldNames[f]).toInt();
+}
+
+Id idOf(const QDomElement& e)
+{
+	return proto::parseId(e.attribute("cid"));
 }
 
 std::vector<QDomElement> childTracks(const QDomElement& container)
@@ -79,6 +89,16 @@ std::vector<QDomElement> childTracks(const QDomElement& container)
 		tracks.push_back(t);
 	}
 	return tracks;
+}
+
+std::vector<QDomElement> childClips(const QDomElement& track)
+{
+	std::vector<QDomElement> clips;
+	for (QDomElement e = track.firstChildElement(); !e.isNull(); e = e.nextSiblingElement())
+	{
+		if (isClipTag(e.tagName())) { clips.push_back(e); }
+	}
+	return clips;
 }
 
 //! Solo is private: the shared mute of each track is the one it had before any solo
@@ -171,10 +191,13 @@ void ProjectState::index()
 {
 	m_tracks.clear();
 	m_songTracks.clear();
+	m_patternEditorTracks.clear();
 	m_clips.clear();
 	m_clipTrack.clear();
 	m_notes.clear();
 	m_unsortedClips.clear();
+	m_songContainer = QDomElement{};
+	m_patternContainer = QDomElement{};
 
 	QDomElement song = m_doc.documentElement().firstChildElement("song");
 	for (QDomElement c = song.firstChildElement("trackcontainer"); !c.isNull(); c = c.nextSiblingElement("trackcontainer"))
@@ -187,19 +210,21 @@ void ProjectState::index()
 
 void ProjectState::indexTrack(const QDomElement& track, bool inSong)
 {
-	const Id trackId = proto::parseId(track.attribute("cid"));
+	const Id trackId = idOf(track);
 	if (trackId == 0 || m_tracks.contains(trackId)) { return; } // not addressable
 	m_tracks.insert(trackId, track);
-	if (inSong) { m_songTracks.insert(trackId); }
+	(inSong ? m_songTracks : m_patternEditorTracks).insert(trackId);
 
 	for (QDomElement e = track.firstChildElement(); !e.isNull(); e = e.nextSiblingElement())
 	{
 		if (isClipTag(e.tagName())) { indexClip(e, trackId); }
 		else if (e.tagName() == "patterntrack")
 		{
-			// The Pattern Editor's tracks are stored inside the first pattern track
+			// The Pattern Editor's tracks are stored inside one of the pattern tracks
 			for (QDomElement c = e.firstChildElement("trackcontainer"); !c.isNull(); c = c.nextSiblingElement("trackcontainer"))
 			{
+				if (c.attribute("type") != proto::PatternContainer || !m_patternContainer.isNull()) { continue; }
+				m_patternContainer = c;
 				for (const QDomElement& t : childTracks(c)) { indexTrack(t, false); }
 			}
 		}
@@ -209,7 +234,7 @@ void ProjectState::indexTrack(const QDomElement& track, bool inSong)
 
 void ProjectState::indexClip(const QDomElement& clip, Id trackId)
 {
-	const Id clipId = proto::parseId(clip.attribute("cid"));
+	const Id clipId = idOf(clip);
 	if (clipId == 0 || m_clips.contains(clipId)) { return; }
 	m_clips.insert(clipId, clip);
 	m_clipTrack.insert(clipId, trackId);
@@ -217,7 +242,7 @@ void ProjectState::indexClip(const QDomElement& clip, Id trackId)
 	auto& notes = m_notes[clipId];
 	for (QDomElement n = clip.firstChildElement("note"); !n.isNull(); n = n.nextSiblingElement("note"))
 	{
-		const Id noteId = proto::parseId(n.attribute("cid"));
+		const Id noteId = idOf(n);
 		if (noteId != 0) { notes.insert(noteId, n); }
 	}
 }
@@ -238,7 +263,7 @@ QDomElement ProjectState::parseFragment(const QJsonValue& xml, const QString& ex
 	QDomDocument fragment;
 	if (!fragment.setContent(xml.toString())) { return {}; }
 	QDomElement root = fragment.documentElement();
-	return root.tagName() == expectedTag && proto::parseId(root.attribute("cid")) != 0 ? root : QDomElement{};
+	return root.tagName() == expectedTag && idOf(root) != 0 ? root : QDomElement{};
 }
 
 
@@ -248,7 +273,7 @@ bool ProjectState::idsAreNew(const QDomElement& element) const
 	auto check = [&](const QDomElement& e) {
 		const bool isTrack = e.tagName() == "track";
 		if (!isTrack && !isClipTag(e.tagName())) { return true; }
-		const Id id = proto::parseId(e.attribute("cid"));
+		const Id id = idOf(e);
 		if (id == 0 || seen.contains(id)) { return false; }
 		seen.insert(id);
 		return isTrack ? !m_tracks.contains(id) : !m_clips.contains(id);
@@ -263,12 +288,60 @@ bool ProjectState::idsAreNew(const QDomElement& element) const
 }
 
 
+QDomElement ProjectState::containerElement(const QString& name) const
+{
+	if (name == proto::SongContainer) { return m_songContainer; }
+	if (name == proto::PatternContainer) { return m_patternContainer; }
+	return {};
+}
+
+
+std::vector<QDomElement> ProjectState::patternTracks() const
+{
+	std::vector<QDomElement> result;
+	for (const QDomElement& t : childTracks(m_songContainer))
+	{
+		if (t.attribute("type").toInt() == PatternTrack) { result.push_back(t); }
+	}
+	return result;
+}
+
+
+std::vector<QDomElement> ProjectState::patternEditorTracks() const
+{
+	return m_patternContainer.isNull() ? std::vector<QDomElement>{} : childTracks(m_patternContainer);
+}
+
+
+int ProjectState::ticksPerBar() const
+{
+	// Same as TimePos::ticksPerBar(): 192 ticks for a 4/4 bar
+	const QDomElement head = m_doc.documentElement().firstChildElement("head");
+	const int numerator = std::max(1, head.attribute("timesig_numerator", "4").toInt());
+	const int denominator = std::max(1, head.attribute("timesig_denominator", "4").toInt());
+	return 192 * numerator / denominator;
+}
+
+
+void ProjectState::removeTrackElement(Id trackId)
+{
+	QDomElement track = m_tracks.value(trackId);
+	for (const Id clipId : m_clipTrack.keys(trackId)) { unindexClip(clipId); }
+	track.parentNode().removeChild(track);
+	m_tracks.remove(trackId);
+	m_songTracks.remove(trackId);
+	m_patternEditorTracks.remove(trackId);
+}
+
+
 bool ProjectState::apply(const QJsonObject& op)
 {
 	const QString type = op.value("op").toString();
 	if (type.startsWith("note.")) { return applyNoteOp(type, op); }
 	if (type.startsWith("track.")) { return applyTrackOp(type, op); }
 	if (type.startsWith("clip.")) { return applyClipOp(type, op); }
+	if (type.startsWith("pattern.")) { return applyPatternOp(type, op); }
+	if (type == proto::op::NotesSet) { return applyNotesOp(op); }
 	return false;
 }
 
@@ -322,62 +395,68 @@ bool ProjectState::applyNoteOp(const QString& type, const QJsonObject& op)
 
 bool ProjectState::applyTrackOp(const QString& type, const QJsonObject& op)
 {
-	if (m_songContainer.isNull()) { return false; }
-
 	if (type == proto::op::TrackAdd)
 	{
-		if (op.value("container").toString() != proto::SongContainer) { return false; }
+		const QString containerName = op.value("container").toString();
+		QDomElement container = containerElement(containerName);
 		QDomElement track = parseFragment(op.value("xml"), "track");
-		const int trackType = track.attribute("type", "-1").toInt();
-		if (track.isNull() || (trackType != InstrumentTrack && trackType != SampleTrack) || !idsAreNew(track))
+		if (container.isNull() || track.isNull() || !isContentTrackType(track.attribute("type", "-1").toInt())
+			|| !idsAreNew(track))
 		{
 			return false;
 		}
+		const bool inPatternEditor = containerName == proto::PatternContainer;
+		// A Pattern Editor track holds exactly one clip per pattern
+		if (inPatternEditor && childClips(track).size() != patternTracks().size()) { return false; }
 		normalize(track);
 		QDomElement imported = m_doc.importNode(track, true).toElement();
-		const auto tracks = childTracks(m_songContainer);
-		const int index = op.value("index").toInt(static_cast<int>(tracks.size()));
-		if (index >= 0 && index < static_cast<int>(tracks.size())) { m_songContainer.insertBefore(imported, tracks[index]); }
-		else { m_songContainer.appendChild(imported); }
-		indexTrack(imported, true);
+		const auto tracks = childTracks(container);
+		const int index = op.value("index").toInt(-1);
+		if (index >= 0 && index < static_cast<int>(tracks.size())) { container.insertBefore(imported, tracks[index]); }
+		else { container.appendChild(imported); }
+		indexTrack(imported, !inPatternEditor);
 		return true;
 	}
 
 	if (type == proto::op::TrackOrder)
 	{
-		if (op.value("container").toString() != proto::SongContainer) { return false; }
+		const QString containerName = op.value("container").toString();
+		QDomElement container = containerElement(containerName);
+		if (container.isNull()) { return false; }
+		const QSet<Id>& members = containerName == proto::SongContainer ? m_songTracks : m_patternEditorTracks;
 		std::vector<QDomElement> wanted;
 		QSet<Id> listed;
 		for (const QJsonValue& v : op.value("ids").toArray())
 		{
 			const Id id = proto::parseId(v);
-			if (!m_songTracks.contains(id) || listed.contains(id)) { return false; }
+			if (!members.contains(id) || listed.contains(id)) { return false; }
 			listed.insert(id);
 			wanted.push_back(m_tracks.value(id));
 		}
+		std::vector<Id> oldPatternOrder;
+		for (const QDomElement& p : patternTracks()) { oldPatternOrder.push_back(idOf(p)); }
+
 		// Listed tracks take the slots the listed tracks occupy now, in the given order
-		auto tracks = childTracks(m_songContainer);
+		auto tracks = childTracks(container);
 		std::size_t next = 0;
 		for (auto& t : tracks)
 		{
-			if (listed.contains(proto::parseId(t.attribute("cid")))) { t = wanted[next++]; }
+			if (listed.contains(idOf(t))) { t = wanted[next++]; }
 		}
-		for (const auto& t : tracks) { m_songContainer.appendChild(t); } // appendChild moves existing nodes
+		for (const auto& t : tracks) { container.appendChild(t); } // appendChild moves existing nodes
+		if (containerName == proto::SongContainer) { permutePatternClips(oldPatternOrder); }
 		return true;
 	}
 
 	const Id trackId = proto::parseId(op.value("id"));
-	if (!m_songTracks.contains(trackId)) { return false; }
+	if (!m_songTracks.contains(trackId) && !m_patternEditorTracks.contains(trackId)) { return false; }
 	QDomElement track = m_tracks.value(trackId);
 
 	if (type == proto::op::TrackRemove)
 	{
-		const int trackType = track.attribute("type").toInt();
-		if (trackType != InstrumentTrack && trackType != SampleTrack) { return false; }
-		for (const Id clipId : m_clipTrack.keys(trackId)) { unindexClip(clipId); }
-		m_songContainer.removeChild(track);
-		m_tracks.remove(trackId);
-		m_songTracks.remove(trackId);
+		// Pattern tracks are removed with pattern.remove, automation tracks are not shared yet
+		if (!isContentTrackType(track.attribute("type").toInt())) { return false; }
+		removeTrackElement(trackId);
 		return true;
 	}
 
@@ -393,10 +472,36 @@ bool ProjectState::applyTrackOp(const QString& type, const QJsonObject& op)
 }
 
 
+void ProjectState::permutePatternClips(const std::vector<Id>& oldPatternOrder)
+{
+	std::vector<Id> newOrder;
+	for (const QDomElement& p : patternTracks()) { newOrder.push_back(idOf(p)); }
+	if (newOrder == oldPatternOrder) { return; }
+
+	// Pattern N's content is clip N of every Pattern Editor track: it moves with its pattern track
+	for (QDomElement track : patternEditorTracks())
+	{
+		const auto clips = childClips(track);
+		if (clips.size() != oldPatternOrder.size()) { continue; } // inconsistent, leave it alone
+		std::vector<QString> slotPositions;
+		for (const auto& c : clips) { slotPositions.push_back(c.attribute("pos")); }
+		for (std::size_t newSlot = 0; newSlot < newOrder.size(); ++newSlot)
+		{
+			const auto oldSlot = static_cast<std::size_t>(
+				std::find(oldPatternOrder.begin(), oldPatternOrder.end(), newOrder[newSlot]) - oldPatternOrder.begin());
+			QDomElement clip = clips[oldSlot];
+			clip.setAttribute("pos", slotPositions[newSlot]);
+			track.appendChild(clip);
+		}
+	}
+}
+
+
 bool ProjectState::applyClipOp(const QString& type, const QJsonObject& op)
 {
 	if (type == proto::op::ClipAdd)
 	{
+		// Only in the Song Editor: Pattern Editor clips come and go with patterns and tracks
 		const Id trackId = proto::parseId(op.value("track"));
 		if (!m_songTracks.contains(trackId)) { return false; }
 		QDomElement track = m_tracks.value(trackId);
@@ -411,14 +516,17 @@ bool ProjectState::applyClipOp(const QString& type, const QJsonObject& op)
 	}
 
 	const Id clipId = proto::parseId(op.value("id"));
-	// Only clips of the Song Editor's tracks; the Pattern Editor's structure is not shared yet
-	if (!m_clips.contains(clipId) || !m_songTracks.contains(m_clipTrack.value(clipId))) { return false; }
+	if (!m_clips.contains(clipId)) { return false; }
+	const Id trackId = m_clipTrack.value(clipId);
+	const bool inPatternEditor = m_patternEditorTracks.contains(trackId);
+	if (!m_songTracks.contains(trackId) && !inPatternEditor) { return false; }
 	QDomElement clip = m_clips.value(clipId);
 	if (clip.tagName() == "automationclip") { return false; }
 
 	if (type == proto::op::ClipRemove)
 	{
-		m_tracks.value(m_clipTrack.value(clipId)).removeChild(clip);
+		if (inPatternEditor) { return false; }
+		m_tracks.value(trackId).removeChild(clip);
 		unindexClip(clipId);
 		return true;
 	}
@@ -428,10 +536,122 @@ bool ProjectState::applyClipOp(const QString& type, const QJsonObject& op)
 		const QJsonObject values = op.value("v").toObject();
 		if (values.isEmpty() || !proto::validFields(values, proto::clipFields())) { return false; }
 		if (values.contains("steps") && clip.tagName() != "midiclip") { return false; }
+		if (values.contains("pos") && inPatternEditor) { return false; } // the position is the pattern
 		setFields(clip, values, proto::clipFields());
 		return true;
 	}
 	return false;
+}
+
+
+bool ProjectState::applyPatternOp(const QString& type, const QJsonObject& op)
+{
+	if (m_songContainer.isNull() || m_patternContainer.isNull()) { return false; }
+
+	if (type == proto::op::PatternAdd)
+	{
+		QDomElement track = parseFragment(op.value("xml"), "track");
+		if (track.isNull() || track.attribute("type").toInt() != PatternTrack || !idsAreNew(track)
+			|| !track.elementsByTagName("trackcontainer").isEmpty())
+		{
+			return false;
+		}
+		// Exactly one new clip for every Pattern Editor track
+		const auto editorTracks = patternEditorTracks();
+		std::vector<QDomElement> clips(editorTracks.size());
+		const QJsonArray entries = op.value("clips").toArray();
+		if (entries.size() != static_cast<qsizetype>(editorTracks.size())) { return false; }
+		QSet<Id> clipIds;
+		for (const QJsonValue& v : entries)
+		{
+			const QJsonObject entry = v.toObject();
+			const Id trackId = proto::parseId(entry.value("track"));
+			const auto it = std::find_if(editorTracks.begin(), editorTracks.end(),
+				[trackId](const QDomElement& t) { return idOf(t) == trackId; });
+			if (it == editorTracks.end()) { return false; }
+			const std::size_t i = static_cast<std::size_t>(it - editorTracks.begin());
+			QDomElement clip = parseFragment(entry.value("xml"), clipTagFor(it->attribute("type").toInt()));
+			if (clip.isNull() || !clips[i].isNull() || !idsAreNew(clip) || clipIds.contains(idOf(clip))) { return false; }
+			clipIds.insert(idOf(clip));
+			clips[i] = clip;
+		}
+		if (clipIds.contains(idOf(track))) { return false; }
+
+		const int newPattern = static_cast<int>(patternTracks().size());
+		normalize(track);
+		QDomElement imported = m_doc.importNode(track, true).toElement();
+		m_songContainer.appendChild(imported);
+		indexTrack(imported, true);
+		for (std::size_t i = 0; i < editorTracks.size(); ++i)
+		{
+			QDomElement editorTrack = editorTracks[i];
+			QDomElement clip = m_doc.importNode(clips[i], true).toElement();
+			clip.setAttribute("pos", newPattern * ticksPerBar());
+			editorTrack.appendChild(clip);
+			indexClip(clip, idOf(editorTrack));
+		}
+		return true;
+	}
+
+	if (type == proto::op::PatternRemove)
+	{
+		const Id trackId = proto::parseId(op.value("id"));
+		if (!m_songTracks.contains(trackId)) { return false; }
+		QDomElement track = m_tracks.value(trackId);
+		if (track.attribute("type").toInt() != PatternTrack) { return false; }
+		const auto patterns = patternTracks();
+		const auto rank = static_cast<std::size_t>(
+			std::find(patterns.begin(), patterns.end(), track) - patterns.begin());
+
+		// The Pattern Editor's tracks are stored in one of the pattern tracks: keep them in another one
+		QDomElement holder = m_patternContainer.parentNode().toElement(); // <patterntrack>
+		if (holder.parentNode() == track)
+		{
+			if (patterns.size() < 2) { return false; } // the last pattern holds the Pattern Editor
+			QDomElement other = patterns[rank == 0 ? 1 : 0];
+			QDomElement otherHolder = other.firstChildElement("patterntrack");
+			if (otherHolder.isNull())
+			{
+				otherHolder = m_doc.createElement("patterntrack");
+				other.appendChild(otherHolder);
+			}
+			otherHolder.appendChild(m_patternContainer); // moves it
+		}
+
+		// Remove clip N of every Pattern Editor track; later patterns move one bar to the left
+		for (QDomElement editorTrack : patternEditorTracks())
+		{
+			const auto clips = childClips(editorTrack);
+			if (rank >= clips.size()) { continue; }
+			for (std::size_t i = clips.size() - 1; i > rank; --i)
+			{
+				QDomElement c = clips[i];
+				c.setAttribute("pos", clips[i - 1].attribute("pos"));
+			}
+			unindexClip(idOf(clips[rank]));
+			editorTrack.removeChild(clips[rank]);
+		}
+		removeTrackElement(trackId);
+		return true;
+	}
+	return false;
+}
+
+
+bool ProjectState::applyNotesOp(const QJsonObject& op)
+{
+	const QJsonValue text = op.value("text");
+	if (!text.isString() || text.toString().size() > proto::MaxNotesSize) { return false; }
+	QDomElement song = m_doc.documentElement().firstChildElement("song");
+	QDomElement notes = song.firstChildElement("projectnotes");
+	if (notes.isNull())
+	{
+		notes = m_doc.createElement("projectnotes");
+		song.appendChild(notes);
+	}
+	while (notes.hasChildNodes()) { notes.removeChild(notes.firstChild()); }
+	notes.appendChild(m_doc.createCDATASection(text.toString()));
+	return true;
 }
 
 

@@ -26,6 +26,7 @@
 #define LMMS_COLLAB_PROJECT_STATE_H
 
 #include <cstdint>
+#include <vector>
 
 #include <QDomDocument>
 #include <QHash>
@@ -59,6 +60,20 @@ private:
 	bool applyNoteOp(const QString& type, const QJsonObject& op);
 	bool applyTrackOp(const QString& type, const QJsonObject& op);
 	bool applyClipOp(const QString& type, const QJsonObject& op);
+	bool applyPatternOp(const QString& type, const QJsonObject& op);
+	bool applyNotesOp(const QJsonObject& op);
+
+	//! Container element and track set for "song" / "patternstore"; null if unknown
+	QDomElement containerElement(const QString& name) const;
+	//! Pattern tracks of the Song Editor in order; pattern N is the N-th of them
+	std::vector<QDomElement> patternTracks() const;
+	//! Pattern Editor tracks in order
+	std::vector<QDomElement> patternEditorTracks() const;
+	//! Length of one bar in ticks (Pattern Editor clip N starts at bar N)
+	int ticksPerBar() const;
+	//! After pattern tracks were reordered: moves the Pattern Editor clips along with their pattern
+	void permutePatternClips(const std::vector<Id>& oldPatternOrder);
+	void removeTrackElement(Id trackId);
 
 	//! Removes private state from a project or from a track sent by a client
 	static void normalize(QDomElement root);
@@ -74,8 +89,10 @@ private:
 
 	QDomDocument m_doc;
 	QDomElement m_songContainer;
+	QDomElement m_patternContainer;              // inside one of the pattern tracks
 	QHash<Id, QDomElement> m_tracks;             // every track by id
-	QSet<Id> m_songTracks;                       // tracks of the Song Editor (structure is shared)
+	QSet<Id> m_songTracks;                       // tracks of the Song Editor
+	QSet<Id> m_patternEditorTracks;              // tracks of the Pattern Editor
 	QHash<Id, QDomElement> m_clips;              // clip elements by id
 	QHash<Id, Id> m_clipTrack;                   // track id of each clip
 	QHash<Id, QHash<Id, QDomElement>> m_notes;   // note elements by clip id, note id (MIDI clips only)

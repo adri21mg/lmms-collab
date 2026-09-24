@@ -48,6 +48,11 @@ public:
 	void clear();
 	void setText( const QString & _text );
 
+	//! The notes as HTML
+	QString html() const;
+	//! Replaces the notes (e.g. with a collaborator's version) keeping the text cursor where it was
+	void setHtmlKeepingCursor(const QString& html);
+
 	void saveSettings( QDomDocument & _doc, QDomElement & _parent ) override;
 	void loadSettings( const QDomElement & _this ) override;
 

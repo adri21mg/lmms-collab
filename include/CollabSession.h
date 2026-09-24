@@ -32,8 +32,10 @@
 
 #include <QHash>
 #include <QJsonArray>
+#include <QElapsedTimer>
 #include <QJsonObject>
 #include <QObject>
+#include <QSet>
 
 #include "CollabId.h"
 #include "CollabProtocol.h"
@@ -50,6 +52,7 @@ class Clip;
 class MidiClip;
 class Note;
 class Track;
+class TrackContainer;
 
 namespace collab
 {
@@ -131,7 +134,7 @@ private:
 	using NoteMap = QHash<collab_id_t, NoteState>;
 	using PendingFields = std::array<qint64, proto::NoteValues::FieldCount>; // ctx per field, 0 = none
 
-	//! Synchronized structure of the Song Editor
+	//! Synchronized structure of the Song Editor and the Pattern Editor
 	struct Structure
 	{
 		struct ClipInfo
@@ -139,10 +142,13 @@ private:
 			collab_id_t track = 0;
 			QJsonObject fields;
 		};
-		QList<collab_id_t> order;                 //!< shared tracks that take part in ordering
+		QList<collab_id_t> order;                 //!< Song Editor tracks in order (incl. pattern tracks)
+		QList<collab_id_t> patternOrder;          //!< Pattern Editor tracks in order
 		QHash<collab_id_t, QJsonObject> tracks;   //!< fields of every shared track
 		QHash<collab_id_t, int> trackTypes;
-		QHash<collab_id_t, ClipInfo> clips;       //!< every shared Song Editor clip
+		QSet<collab_id_t> patternEditorTracks;
+		QHash<collab_id_t, ClipInfo> clips;       //!< every shared clip (Pattern Editor clips: no "pos")
+		std::optional<QString> notes;             //!< project notes (only with a GUI)
 	};
 
 	enum class Kind { Track, Clip, Note };
@@ -214,9 +220,12 @@ private:
 	static Clip* createClipFromXml(Track* track, const QString& xml);
 	static void removeTrack(Track* track);
 	static void removeClip(Clip* clip);
-	static void reorderTracks(const QList<collab_id_t>& order);
-	static bool syncsStructure(int trackType);
-	static bool takesPartInOrder(int trackType);
+	//! Moves tracks one step at a time, as dragging does, so pattern tracks take their patterns along
+	static void reorderTracks(TrackContainer* container, const QList<collab_id_t>& order);
+	static bool syncsStructure(int trackType, bool inPatternEditor);
+	void addRemotePattern(const QJsonObject& op);
+	//! Project notes currently shown, if there is a GUI
+	static std::optional<QString> currentNotes();
 
 	// Undo
 	Gesture* openGestureFor(Kind kind, collab_id_t parent, collab_id_t id);
@@ -257,6 +266,7 @@ private:
 	QList<QJsonObject> m_txQueue;
 	QTimer* m_txQueueTimer;
 	QTimer* m_structureTimer;
+	QElapsedTimer m_notesSent; //!< notes are sent at most twice per second
 
 	std::map<std::uint64_t, Gesture> m_gestures;                      //!< by journal token
 	QHash<QPair<int, collab_id_t>, std::uint64_t> m_openGesture;      //!< (kind, id) -> gesture collecting changes

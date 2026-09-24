@@ -48,6 +48,13 @@
 //     {op:"clip.add",    track, xml}                               complete clip element (with its notes)
 //     {op:"clip.remove", id}
 //     {op:"clip.set",    id, v:{pos,len,off,name,color,muted,autoresize,steps}}  any subset
+//     {op:"pattern.add", xml, clips:[{track, xml}]}                new pattern track + its clip in every
+//                                                                   Pattern Editor track; appended as the last pattern
+//     {op:"pattern.remove", id}
+//     {op:"notes.set",   text}                                     project notes (HTML)
+// Tracks live in the "song" container (Song Editor) or the "patternstore" container (Pattern Editor).
+// Pattern N is the N-th pattern track in song order; its content is the N-th clip of every Pattern Editor
+// track, so reordering pattern tracks (track.order) also reorders those clips.
 // clip/id/track are collaboration ids as 16 hex digits (see include/CollabId.h).
 
 #ifndef LMMS_COLLAB_PROTOCOL_H
@@ -99,10 +106,16 @@ inline constexpr auto TrackOrder = "track.order";
 inline constexpr auto ClipAdd = "clip.add";
 inline constexpr auto ClipRemove = "clip.remove";
 inline constexpr auto ClipSet = "clip.set";
+inline constexpr auto PatternAdd = "pattern.add";
+inline constexpr auto PatternRemove = "pattern.remove";
+inline constexpr auto NotesSet = "notes.set";
 } // namespace op
 
-//! The only track container synchronized so far (Song Editor); the Pattern Editor comes later
+//! Track containers: the Song Editor and the Pattern Editor
 inline constexpr auto SongContainer = "song";
+inline constexpr auto PatternContainer = "patternstore";
+//! Largest project notes text accepted
+inline constexpr int MaxNotesSize = 1024 * 1024;
 
 //! Description of one synchronized attribute of a track or clip
 struct FieldSpec

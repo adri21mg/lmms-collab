@@ -37,6 +37,8 @@
 #include "InstrumentTrack.h"
 #include "MidiClip.h"
 #include "Note.h"
+#include "PatternStore.h"
+#include "PatternTrack.h"
 #include "Song.h"
 
 using namespace lmms;
@@ -175,6 +177,10 @@ private slots:
 		auto track = dynamic_cast<InstrumentTrack*>(Track::create(Track::Type::Instrument, Engine::getSong()));
 		m_clip = new MidiClip(track);
 		m_clip->addNote(Note{TimePos{48}, TimePos{0}, 60}, false);
+
+		// Like LMMS' default project: one pattern with one Pattern Editor track
+		Track::create(Track::Type::Pattern, Engine::getSong());
+		Track::create(Track::Type::Instrument, Engine::patternStore());
 	}
 
 	void cleanupTestCase()
@@ -577,8 +583,149 @@ private slots:
 		journal->undo();
 		QVERIFY2(findClip(mineId) != nullptr, "a clip that others changed is not removed by my undo");
 	}
+	// ---- M2b: Pattern Editor ----
+
+	void testPatternsSync()
+	{
+		m_peer.drain();
+		auto song = Engine::getSong();
+		auto store = Engine::patternStore();
+		QCOMPARE(store->tracks().size(), std::size_t{1});
+		Track* editorTrack = store->tracks().front();
+
+		// A new pattern carries its content: its clip in every Pattern Editor track
+		auto second = dynamic_cast<PatternTrack*>(Track::create(Track::Type::Pattern, song));
+		QCOMPARE(second->patternIndex(), 1);
+		auto op = m_peer.nextForeignOp("pattern.add");
+		QCOMPARE(op.value("clips").toArray().size(), 1);
+		const collab_id_t secondClipId = editorTrack->getClips()[1]->collabId();
+		QVERIFY(op.value("clips").toArray().first().toObject().value("xml").toString().contains(proto::idString(secondClipId)));
+
+		// Steps in the new pattern are shared notes
+		dynamic_cast<MidiClip*>(editorTrack->getClips()[1])->addStepNote(3);
+		QCOMPARE(m_peer.nextForeignOp("note.add").value("clip").toString(), proto::idString(secondClipId));
+
+		// A pattern created by the peer: the local clips of the new pattern take the peer's ids
+		const collab_id_t remotePattern = 0x00000000cccc0001ULL, remoteClip = 0x00000000cccc0002ULL;
+		QDomDocument doc;
+		QVERIFY(static_cast<bool>(doc.setContent(op.value("xml").toString())));
+		doc.documentElement().setAttribute("cid", proto::idString(remotePattern));
+		doc.documentElement().setAttribute("name", "Remote pattern");
+		QDomDocument clipDoc;
+		QVERIFY(static_cast<bool>(clipDoc.setContent(op.value("clips").toArray().first().toObject().value("xml").toString())));
+		clipDoc.documentElement().setAttribute("cid", proto::idString(remoteClip));
+		for (QDomElement n = clipDoc.documentElement().firstChildElement("note"); !n.isNull();
+			n = clipDoc.documentElement().firstChildElement("note"))
+		{
+			clipDoc.documentElement().removeChild(n);
+		}
+		m_peer.sendOps({QJsonObject{{"op", "pattern.add"}, {"xml", toString(doc.documentElement())},
+			{"clips", QJsonArray{QJsonObject{{"track", proto::idString(editorTrack->collabId())},
+				{"xml", toString(clipDoc.documentElement())}}}}}});
+		QTRY_VERIFY(findTrack(remotePattern) != nullptr);
+		auto third = dynamic_cast<PatternTrack*>(findTrack(remotePattern));
+		QCOMPARE(third->name(), QString{"Remote pattern"});
+		QCOMPARE(editorTrack->getClips()[third->patternIndex()]->collabId(), remoteClip);
+		m_peer.sendOps({noteOp("note.add", dynamic_cast<MidiClip*>(findClip(remoteClip)), 0x00000000cccc0003ULL,
+			{{"key", 57}, {"pos", 0}, {"len", 12}, {"vol", 100}, {"pan", 0}, {"type", 1}})});
+		QTRY_VERIFY(dynamic_cast<MidiClip*>(findClip(remoteClip))->findNote(0x00000000cccc0003ULL) != nullptr);
+
+		// Reordering patterns: each pattern keeps its content, here and on the server
+		auto contentOf = [&](PatternTrack* p) { return editorTrack->getClips()[p->patternIndex()]->collabId(); };
+		QCOMPARE(contentOf(second), secondClipId);
+		m_peer.drain();
+		auto index = [&](Track* t) {
+			return static_cast<int>(std::find(song->tracks().begin(), song->tracks().end(), t) - song->tracks().begin());
+		};
+		// what dragging "third" up by one does
+		Track* above = song->tracks()[index(third) - 1];
+		PatternTrack::swapPatternTracks(third, above);
+		song->moveTrack(third, index(third) - 1);
+		QCOMPARE(contentOf(second), secondClipId);
+		QCOMPARE(contentOf(third), remoteClip);
+		QVERIFY(!m_peer.nextForeignOp("track.order").isEmpty());
+		QVERIFY2(snapshotContentOf(remotePattern) == remoteClip, "the server moved the content with the pattern");
+		QVERIFY2(snapshotContentOf(second->collabId()) == secondClipId, "for both patterns");
+
+		// ...and when the peer reorders
+		QStringList order;
+		for (Track* t : song->tracks()) { order.append(proto::idString(t->collabId())); }
+		order.swapItemsAt(order.indexOf(proto::idString(third->collabId())),
+			order.indexOf(proto::idString(second->collabId())));
+		m_peer.sendOps({QJsonObject{{"op", "track.order"}, {"container", "song"},
+			{"ids", QJsonArray::fromStringList(order)}}});
+		QTRY_VERIFY(index(third) > index(second));
+		QCOMPARE(contentOf(second), secondClipId);
+		QCOMPARE(contentOf(third), remoteClip);
+
+		// A new Pattern Editor track: one clip per pattern
+		m_peer.drain();
+		Track* hihat = Track::create(Track::Type::Instrument, store);
+		op = m_peer.nextForeignOp("track.add");
+		QCOMPARE(op.value("container").toString(), QString{"patternstore"});
+		QVERIFY(op.value("xml").toString().contains(proto::idString(hihat->getClips()[2]->collabId())));
+		hihat->setName("Hihat");
+		QCOMPARE(m_peer.nextForeignOp("track.set").value("v").toObject(), (QJsonObject{{"name", "Hihat"}}));
+
+		// More steps in a pattern clip: steps and length change, never the position
+		dynamic_cast<MidiClip*>(hihat->getClips()[0])->setStepCount(32);
+		const auto steps = m_peer.nextForeignOp("clip.set").value("v").toObject();
+		QCOMPARE(steps.value("steps").toInt(), 32);
+		QVERIFY(!steps.contains("pos"));
+
+		// Removing patterns, locally and remotely
+		const collab_id_t secondId = second->collabId();
+		delete second;
+		QCOMPARE(proto::parseId(m_peer.nextForeignOp("pattern.remove").value("id")), secondId);
+		QVERIFY(findClip(secondClipId) == nullptr);
+		m_peer.sendOps({QJsonObject{{"op", "pattern.remove"}, {"id", proto::idString(remotePattern)}}});
+		QTRY_VERIFY(findTrack(remotePattern) == nullptr);
+		QVERIFY(findClip(remoteClip) == nullptr);
+		QCOMPARE(editorTrack->getClips().size(), std::size_t{1});
+		QVERIFY2(m_peer.nextForeignTx(500).isEmpty(), "no echo of the remote removal");
+	}
+
 private:
 	QString m_newTrackXml;
+
+	static QString toString(const QDomElement& e)
+	{
+		QString text;
+		QTextStream ts{&text};
+		e.save(ts, 0);
+		return text;
+	}
+
+	//! Clip id of pattern @p patternId's content in the first Pattern Editor track of a fresh server snapshot
+	collab_id_t snapshotContentOf(collab_id_t patternId)
+	{
+		FakePeer watcher;
+		if (!watcher.connectTo(m_port)) { return 0; }
+		watcher.send({{"t", "open"}, {"project", "session-test"}});
+		QDomDocument doc;
+		if (!doc.setContent(watcher.next("joined").value("mmp").toString())) { return 0; }
+		QDomElement song = doc.documentElement().firstChildElement("song").firstChildElement("trackcontainer");
+		int rank = 0, patternRank = -1;
+		for (QDomElement t = song.firstChildElement("track"); !t.isNull(); t = t.nextSiblingElement("track"))
+		{
+			if (t.attribute("type") != "1") { continue; }
+			if (proto::parseId(t.attribute("cid")) == patternId) { patternRank = rank; }
+			++rank;
+		}
+		const QDomNodeList containers = doc.elementsByTagName("trackcontainer");
+		for (int i = 0; i < containers.size(); ++i)
+		{
+			const QDomElement c = containers.at(i).toElement();
+			if (c.attribute("type") != "patternstore") { continue; }
+			int k = 0;
+			for (QDomElement clip = c.firstChildElement("track").firstChildElement("midiclip"); !clip.isNull();
+				clip = clip.nextSiblingElement("midiclip"), ++k)
+			{
+				if (k == patternRank) { return proto::parseId(clip.attribute("cid")); }
+			}
+		}
+		return 0;
+	}
 
 	static Track* findTrack(collab_id_t id)
 	{

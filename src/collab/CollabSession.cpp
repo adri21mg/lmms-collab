@@ -45,9 +45,13 @@
 #include "InstrumentTrack.h"
 #include "MidiClip.h"
 #include "Note.h"
+#include "PatternEditor.h"
 #include "PatternStore.h"
+#include "PatternTrack.h"
+#include "ProjectNotes.h"
 #include "Song.h"
 #include "SongEditor.h"
+#include "TrackContainerView.h"
 #include "TrackView.h"
 
 namespace lmms::collab
@@ -338,31 +342,19 @@ void CollabSession::startTracking()
 {
 	stopTracking();
 
-	// Every track of the Song Editor at this moment is shared (also pattern and automation tracks,
-	// although only some of their changes are synchronized so far)
-	for (Track* track : Engine::getSong()->tracks())
+	// Every track at this moment is shared (also automation tracks, although only some of their changes
+	// are synchronized so far)
+	for (const TrackContainer* container : {static_cast<TrackContainer*>(Engine::getSong()),
+		static_cast<TrackContainer*>(Engine::patternStore())})
 	{
-		const collab_id_t id = track->collabId();
-		m_structure.tracks.insert(id, trackFields(track));
-		m_structure.trackTypes.insert(id, static_cast<int>(track->type()));
-	}
-	m_structure = currentStructure();
-
-	// Notes of every MIDI clip, in the Song Editor and in the Pattern Editor
-	std::vector<Track*> tracks = Engine::getSong()->tracks();
-	const auto& patternTracks = Engine::patternStore()->tracks();
-	tracks.insert(tracks.end(), patternTracks.begin(), patternTracks.end());
-	for (Track* track : tracks)
-	{
-		for (Clip* clip : track->getClips())
+		for (Track* track : container->tracks())
 		{
-			if (auto midiClip = dynamic_cast<MidiClip*>(clip))
-			{
-				m_baselines[midiClip->collabId()] = currentNotes(*midiClip);
-				trackClip(midiClip);
-			}
+			m_structure.tracks.insert(track->collabId(), trackFields(track));
+			m_structure.trackTypes.insert(track->collabId(), static_cast<int>(track->type()));
 		}
 	}
+	m_structure = currentStructure();
+	syncNoteTracking();
 
 	ProjectJournal::setHook(this);
 	m_structureTimer->start(StructureIntervalMs);
@@ -508,7 +500,7 @@ void CollabSession::untrackClip(collab_id_t clipId)
 
 void CollabSession::syncNoteTracking()
 {
-	// MIDI clips of the Song Editor come and go with the structure; Pattern Editor clips stay
+	// The notes of every shared MIDI clip are synchronized; clips come and go with the structure
 	for (auto it = m_structure.clips.cbegin(); it != m_structure.clips.cend(); ++it)
 	{
 		if (m_baselines.contains(it.key())) { continue; }
@@ -520,12 +512,10 @@ void CollabSession::syncNoteTracking()
 	}
 	for (const collab_id_t clipId : m_baselines.keys())
 	{
-		if (m_structure.clips.contains(clipId)) { continue; }
-		// A Song Editor clip that is gone (Pattern Editor clips are not part of the structure yet)
-		MidiClip* clip = findMidiClip(clipId);
-		if (!clip || clip->getTrack()->trackContainer() == Engine::getSong()) { untrackClip(clipId); }
+		if (!m_structure.clips.contains(clipId)) { untrackClip(clipId); }
 	}
 }
+
 
 
 void CollabSession::onClipChanged(MidiClip* clip)
@@ -694,19 +684,14 @@ void CollabSession::writeNote(MidiClip* clip, collab_id_t id, const std::optiona
 
 
 // ------------------------------------------------------------------------------------------------
-// Structure (Song Editor tracks and clips)
+// Structure (tracks and clips of the Song Editor and the Pattern Editor, project notes)
 
-bool CollabSession::syncsStructure(int trackType)
+bool CollabSession::syncsStructure(int trackType, bool inPatternEditor)
 {
-	// Creating/removing pattern tracks changes the Pattern Editor (not shared yet); automation later
-	return trackType == static_cast<int>(Track::Type::Instrument) || trackType == static_cast<int>(Track::Type::Sample);
-}
-
-
-bool CollabSession::takesPartInOrder(int trackType)
-{
-	// Moving pattern tracks also swaps their patterns in the Pattern Editor, which is not shared yet
-	return trackType != static_cast<int>(Track::Type::Pattern);
+	// Tracks that can be created and removed by collaborators (automation comes later)
+	const bool content = trackType == static_cast<int>(Track::Type::Instrument)
+		|| trackType == static_cast<int>(Track::Type::Sample);
+	return inPatternEditor ? content : content || trackType == static_cast<int>(Track::Type::Pattern);
 }
 
 
@@ -724,6 +709,8 @@ QJsonObject CollabSession::clipFields(const Clip* clip)
 		{"color", clip->color() ? clip->color()->name() : QString{}}, {"muted", clip->isMuted()},
 		{"autoresize", clip->getAutoResize()}};
 	if (auto midiClip = dynamic_cast<const MidiClip*>(clip)) { fields.insert("steps", midiClip->stepCount()); }
+	// In the Pattern Editor the position is the pattern the clip belongs to, not something to edit
+	if (clip->getTrack() && clip->getTrack()->trackContainer() == Engine::patternStore()) { fields.remove("pos"); }
 	return fields;
 }
 
@@ -780,6 +767,14 @@ QString CollabSession::serialize(Track* track)
 			for (const QString& a : WindowAttributes) { e.removeAttribute(a); }
 		}
 	}
+	// The pattern track with index 0 also saves the whole Pattern Editor; that is shared separately
+	for (QDomElement p = element.firstChildElement("patterntrack"); !p.isNull(); p = p.nextSiblingElement("patterntrack"))
+	{
+		for (QDomElement c = p.firstChildElement("trackcontainer"); !c.isNull(); c = p.firstChildElement("trackcontainer"))
+		{
+			p.removeChild(c);
+		}
+	}
 	const bool muted = sharedMute(track);
 	element.setAttribute("solo", 0);
 	element.setAttribute("muted", muted ? 1 : 0);
@@ -809,20 +804,40 @@ Clip* CollabSession::createClipFromXml(Track* track, const QString& xml)
 }
 
 
+namespace
+{
+
+//! The editor showing a track container, if there is a GUI
+gui::TrackContainerView* editorFor(const TrackContainer* container)
+{
+	auto gui = gui::getGUI();
+	if (!gui) { return nullptr; }
+	if (container == Engine::getSong() && gui->songEditor()) { return gui->songEditor()->m_editor; }
+	if (container == Engine::patternStore() && gui->patternEditor()) { return gui->patternEditor()->m_editor; }
+	return nullptr;
+}
+
+gui::TrackView* viewOf(gui::TrackContainerView* editor, const Track* track)
+{
+	if (!editor) { return nullptr; }
+	for (gui::TrackView* view : editor->trackViews())
+	{
+		if (view->getTrack() == track) { return view; }
+	}
+	return nullptr;
+}
+
+} // namespace
+
+
 void CollabSession::removeTrack(Track* track)
 {
-	// Same path as the Song Editor's "remove track", so its view and windows go away properly
-	if (auto gui = gui::getGUI(); gui && gui->songEditor())
+	// Same path as the editor's "remove track", so its view and windows go away properly
+	auto editor = editorFor(track->trackContainer());
+	if (gui::TrackView* view = viewOf(editor, track))
 	{
-		auto editor = gui->songEditor()->m_editor;
-		for (gui::TrackView* view : editor->trackViews())
-		{
-			if (view->getTrack() == track)
-			{
-				editor->deleteTrackView(view);
-				return;
-			}
-		}
+		editor->deleteTrackView(view);
+		return;
 	}
 	auto guard = Engine::audioEngine()->requestChangesGuard();
 	delete track;
@@ -839,61 +854,74 @@ void CollabSession::removeClip(Clip* clip)
 }
 
 
-void CollabSession::reorderTracks(const QList<collab_id_t>& order)
+void CollabSession::reorderTracks(TrackContainer* container, const QList<collab_id_t>& order)
 {
-	Song* song = Engine::getSong();
-	auto indexOf = [song](const Track* t) {
-		const auto& tracks = song->tracks();
+	auto indexOf = [container](const Track* t) {
+		const auto& tracks = container->tracks();
 		return static_cast<int>(std::find(tracks.begin(), tracks.end(), t) - tracks.begin());
+	};
+	auto editor = editorFor(container);
+	// One step, exactly like dragging a track by one position (swaps patterns of two pattern tracks)
+	auto step = [&](Track* track, int to) {
+		if (gui::TrackView* view = viewOf(editor, track))
+		{
+			editor->moveTrackView(view, to);
+			return;
+		}
+		PatternTrack::swapPatternTracks(track, container->tracks()[to]);
+		container->moveTrack(track, to);
 	};
 
 	std::vector<Track*> wanted;
 	for (const collab_id_t id : order)
 	{
 		Track* t = findTrack(id);
-		if (t && t->trackContainer() == song) { wanted.push_back(t); }
+		if (t && t->trackContainer() == container) { wanted.push_back(t); }
 	}
-	// The listed tracks take the positions they occupy now, in the wanted order; other tracks stay where they are
+	// The listed tracks take the positions they occupy now, in the wanted order; others stay where they are
 	std::vector<int> positions;
 	for (Track* t : wanted) { positions.push_back(indexOf(t)); }
 	std::sort(positions.begin(), positions.end());
 
-	auto gui = gui::getGUI();
-	auto editor = gui && gui->songEditor() ? gui->songEditor()->m_editor : nullptr;
 	for (std::size_t k = 0; k < wanted.size(); ++k)
 	{
-		if (indexOf(wanted[k]) == positions[k]) { continue; }
-		gui::TrackView* view = nullptr;
-		if (editor)
-		{
-			for (gui::TrackView* v : editor->trackViews())
-			{
-				if (v->getTrack() == wanted[k]) { view = v; }
-			}
-		}
-		if (view) { editor->moveTrackView(view, positions[k]); }
-		else { song->moveTrack(wanted[k], positions[k]); }
+		while (indexOf(wanted[k]) > positions[k]) { step(wanted[k], indexOf(wanted[k]) - 1); }
+		while (indexOf(wanted[k]) < positions[k]) { step(wanted[k], indexOf(wanted[k]) + 1); }
 	}
+}
+
+
+std::optional<QString> CollabSession::currentNotes()
+{
+	auto gui = gui::getGUI();
+	if (!gui || !gui->getProjectNotes()) { return std::nullopt; }
+	return gui->getProjectNotes()->html();
 }
 
 
 CollabSession::Structure CollabSession::currentStructure() const
 {
 	Structure s;
-	for (Track* track : Engine::getSong()->tracks())
-	{
-		const collab_id_t id = track->collabId();
-		const int type = static_cast<int>(track->type());
-		if (!m_structure.tracks.contains(id) && !syncsStructure(type)) { continue; } // not shared (yet)
-		s.tracks.insert(id, trackFields(track));
-		s.trackTypes.insert(id, type);
-		if (takesPartInOrder(type)) { s.order.append(id); }
-		for (const Clip* clip : track->getClips())
+	auto addTracks = [&](const TrackContainer* container, bool inPatternEditor) {
+		for (Track* track : container->tracks())
 		{
-			if (dynamic_cast<const AutomationClip*>(clip)) { continue; } // automation comes later
-			s.clips.insert(clip->collabId(), Structure::ClipInfo{id, clipFields(clip)});
+			const collab_id_t id = track->collabId();
+			const int type = static_cast<int>(track->type());
+			if (!m_structure.tracks.contains(id) && !syncsStructure(type, inPatternEditor)) { continue; }
+			s.tracks.insert(id, trackFields(track));
+			s.trackTypes.insert(id, type);
+			(inPatternEditor ? s.patternOrder : s.order).append(id);
+			if (inPatternEditor) { s.patternEditorTracks.insert(id); }
+			for (const Clip* clip : track->getClips())
+			{
+				if (dynamic_cast<const AutomationClip*>(clip)) { continue; } // automation comes later
+				s.clips.insert(clip->collabId(), Structure::ClipInfo{id, clipFields(clip)});
+			}
 		}
-	}
+	};
+	addTracks(Engine::getSong(), false);
+	addTracks(Engine::patternStore(), true);
+	s.notes = currentNotes();
 	return s;
 }
 
@@ -901,7 +929,7 @@ CollabSession::Structure CollabSession::currentStructure() const
 void CollabSession::flushStructure()
 {
 	if (m_state != State::Live) { return; }
-	const Structure current = currentStructure();
+	Structure current = currentStructure();
 	const qint64 ctx = m_nextCtx;
 	QJsonArray ops;
 
@@ -913,30 +941,55 @@ void CollabSession::flushStructure()
 		if (const MidiClip* clip = findMidiClip(clipId)) { fields.insert("_n", notesSignature(currentNotes(*clip))); }
 		return fields;
 	};
+	auto isNew = [this](collab_id_t trackId) { return !m_structure.tracks.contains(trackId); };
 
-	// New tracks are sent complete (instrument, settings and clips)
+	// New Song Editor tracks are sent complete (instrument, settings, clips); a new pattern also carries
+	// its content: its clip in every Pattern Editor track that is already shared
 	for (Track* track : Engine::getSong()->tracks())
 	{
 		const collab_id_t id = track->collabId();
-		if (current.tracks.contains(id) && !m_structure.tracks.contains(id))
+		if (!current.tracks.contains(id) || !isNew(id)) { continue; }
+		if (auto pattern = dynamic_cast<PatternTrack*>(track))
+		{
+			QJsonArray clips;
+			for (Track* editorTrack : Engine::patternStore()->tracks())
+			{
+				const auto& trackClips = editorTrack->getClips();
+				const auto index = static_cast<std::size_t>(pattern->patternIndex());
+				if (isNew(editorTrack->collabId()) || index >= trackClips.size()) { continue; }
+				clips.append(QJsonObject{{"track", proto::idString(editorTrack->collabId())},
+					{"xml", serialize(trackClips[index])}});
+			}
+			ops.append(QJsonObject{{"op", proto::op::PatternAdd}, {"xml", serialize(track)}, {"clips", clips}});
+		}
+		else
 		{
 			ops.append(QJsonObject{{"op", proto::op::TrackAdd}, {"container", proto::SongContainer},
 				{"index", -1}, {"xml", serialize(track)}});
 		}
 	}
+	// New Pattern Editor tracks, with their clip for every pattern
+	for (Track* track : Engine::patternStore()->tracks())
+	{
+		const collab_id_t id = track->collabId();
+		if (!current.tracks.contains(id) || !isNew(id)) { continue; }
+		ops.append(QJsonObject{{"op", proto::op::TrackAdd}, {"container", proto::PatternContainer},
+			{"index", -1}, {"xml", serialize(track)}});
+	}
 
-	// New clips and clip changes (clips of new tracks were sent with their track)
+	// Clips: Song Editor clips come and go on their own; Pattern Editor clips only change (they are
+	// created and removed together with patterns and tracks)
 	for (auto it = current.clips.cbegin(); it != current.clips.cend(); ++it)
 	{
 		const collab_id_t clipId = it.key();
 		const collab_id_t trackId = it->track;
-		if (!m_structure.tracks.contains(trackId)) { continue; }
+		if (isNew(trackId)) { continue; }
 		const auto old = m_structure.clips.constFind(clipId);
 		if (old == m_structure.clips.cend())
 		{
-			Clip* clip = findClip(clipId);
+			if (current.patternEditorTracks.contains(trackId)) { continue; } // part of a new pattern
 			ops.append(QJsonObject{{"op", proto::op::ClipAdd}, {"track", proto::idString(trackId)},
-				{"xml", serialize(clip)}});
+				{"xml", serialize(findClip(clipId))}});
 			record(Kind::Clip, trackId, clipId, std::nullopt, clipState(clipId, it->fields));
 			continue;
 		}
@@ -946,11 +999,14 @@ void CollabSession::flushStructure()
 		markPending('c', clipId, changed);
 		record(Kind::Clip, trackId, clipId, clipState(clipId, old->fields), clipState(clipId, it->fields));
 	}
-
-	// Removed clips (not the clips of removed tracks: removing the track removes them)
 	for (auto it = m_structure.clips.cbegin(); it != m_structure.clips.cend(); ++it)
 	{
-		if (current.clips.contains(it.key()) || !current.tracks.contains(it->track)) { continue; }
+		// Clips of removed tracks and Pattern Editor clips go away with their track or pattern
+		if (current.clips.contains(it.key()) || !current.tracks.contains(it->track)
+			|| m_structure.patternEditorTracks.contains(it->track))
+		{
+			continue;
+		}
 		ops.append(QJsonObject{{"op", proto::op::ClipRemove}, {"id", proto::idString(it.key())}});
 		QJsonObject before = it->fields;
 		if (m_baselines.contains(it.key()))
@@ -975,18 +1031,33 @@ void CollabSession::flushStructure()
 	for (auto it = m_structure.tracks.cbegin(); it != m_structure.tracks.cend(); ++it)
 	{
 		if (current.tracks.contains(it.key())) { continue; }
-		// A removed pattern or automation track cannot be shared yet; it just stops being shared
-		if (syncsStructure(m_structure.trackTypes.value(it.key())))
-		{
-			ops.append(QJsonObject{{"op", proto::op::TrackRemove}, {"id", proto::idString(it.key())}});
-		}
+		const int type = m_structure.trackTypes.value(it.key());
+		const bool inPatternEditor = m_structure.patternEditorTracks.contains(it.key());
+		if (!syncsStructure(type, inPatternEditor)) { continue; } // e.g. automation: just stops being shared
+		const bool pattern = type == static_cast<int>(Track::Type::Pattern);
+		ops.append(QJsonObject{{"op", pattern ? proto::op::PatternRemove : proto::op::TrackRemove},
+			{"id", proto::idString(it.key())}});
 	}
 
-	if (current.order != m_structure.order)
-	{
+	// Order (after additions and removals, so every listed track exists for the others)
+	auto orderOp = [&](const QList<collab_id_t>& order, const char* container) {
 		QJsonArray ids;
-		for (const collab_id_t id : current.order) { ids.append(proto::idString(id)); }
-		ops.append(QJsonObject{{"op", proto::op::TrackOrder}, {"container", proto::SongContainer}, {"ids", ids}});
+		for (const collab_id_t id : order) { ids.append(proto::idString(id)); }
+		ops.append(QJsonObject{{"op", proto::op::TrackOrder}, {"container", container}, {"ids", ids}});
+	};
+	if (current.order != m_structure.order) { orderOp(current.order, proto::SongContainer); }
+	if (current.patternOrder != m_structure.patternOrder) { orderOp(current.patternOrder, proto::PatternContainer); }
+
+	// Project notes: the whole text, at most twice per second while someone types
+	if (current.notes && current.notes != m_structure.notes)
+	{
+		if (!m_notesSent.isValid() || m_notesSent.elapsed() >= 500)
+		{
+			ops.append(QJsonObject{{"op", proto::op::NotesSet}, {"text", *current.notes}});
+			m_pendingStructure[pendingKey('n', 0, "text")] = ctx;
+			m_notesSent.start();
+		}
+		else { current.notes = m_structure.notes; } // try again at the next tick
 	}
 
 	m_structure = current;
@@ -995,10 +1066,41 @@ void CollabSession::flushStructure()
 }
 
 
+void CollabSession::addRemotePattern(const QJsonObject& op)
+{
+	QDomDocument doc;
+	if (!doc.setContent(op.value("xml").toString()) || findTrack(proto::parseId(doc.documentElement().attribute("cid"))))
+	{
+		return;
+	}
+	// Creating a pattern selects it in the Pattern Editor; which pattern this user looks at is private
+	const int shownPattern = Engine::patternStore()->currentPattern();
+	auto pattern = dynamic_cast<PatternTrack*>(Track::create(doc.documentElement(), Engine::getSong()));
+	if (!pattern) { return; }
+	const auto index = static_cast<std::size_t>(pattern->patternIndex());
+
+	// The new pattern's clips were just created with local ids: take over the author's clips
+	for (const QJsonValue& value : op.value("clips").toArray())
+	{
+		const QJsonObject entry = value.toObject();
+		Track* editorTrack = findTrack(proto::parseId(entry.value("track")));
+		if (!editorTrack || editorTrack->trackContainer() != Engine::patternStore()) { continue; }
+		const auto& clips = editorTrack->getClips();
+		QDomDocument clipDoc;
+		if (index >= clips.size() || !clipDoc.setContent(entry.value("xml").toString())) { continue; }
+		Clip* clip = clips[index];
+		const TimePos position = clip->startPosition(); // the position is the pattern here
+		clip->restoreState(clipDoc.documentElement());
+		clip->movePosition(position);
+	}
+	Engine::patternStore()->setCurrentPattern(shownPattern);
+	Engine::patternStore()->updateComboBox();
+}
+
+
 void CollabSession::applyRemoteStructureOp(const QJsonObject& op)
 {
 	const QString type = op.value("op").toString();
-	Song* song = Engine::getSong();
 	auto without = [this](char kind, collab_id_t id, QJsonObject fields) {
 		for (const QString& key : fields.keys())
 		{
@@ -1007,20 +1109,27 @@ void CollabSession::applyRemoteStructureOp(const QJsonObject& op)
 		}
 		return fields;
 	};
+	auto containerNamed = [](const QString& name) -> TrackContainer* {
+		if (name == proto::SongContainer) { return Engine::getSong(); }
+		if (name == proto::PatternContainer) { return Engine::patternStore(); }
+		return nullptr;
+	};
 
 	m_applyingRemote = true;
 	if (type == proto::op::TrackAdd)
 	{
 		QDomDocument doc;
-		if (doc.setContent(op.value("xml").toString()) && !findTrack(proto::parseId(doc.documentElement().attribute("cid"))))
+		TrackContainer* container = containerNamed(op.value("container").toString());
+		if (container && doc.setContent(op.value("xml").toString())
+			&& !findTrack(proto::parseId(doc.documentElement().attribute("cid"))))
 		{
-			Track::create(doc.documentElement(), song);
+			Track::create(doc.documentElement(), container);
 		}
 	}
-	else if (type == proto::op::TrackRemove)
+	else if (type == proto::op::PatternAdd) { addRemotePattern(op); }
+	else if (type == proto::op::TrackRemove || type == proto::op::PatternRemove)
 	{
-		Track* track = findTrack(proto::parseId(op.value("id")));
-		if (track && track->trackContainer() == song) { removeTrack(track); }
+		if (Track* track = findTrack(proto::parseId(op.value("id")))) { removeTrack(track); }
 	}
 	else if (type == proto::op::TrackSet)
 	{
@@ -1029,9 +1138,12 @@ void CollabSession::applyRemoteStructureOp(const QJsonObject& op)
 	}
 	else if (type == proto::op::TrackOrder)
 	{
-		QList<collab_id_t> order;
-		for (const QJsonValue& v : op.value("ids").toArray()) { order.append(proto::parseId(v)); }
-		reorderTracks(order);
+		if (TrackContainer* container = containerNamed(op.value("container").toString()))
+		{
+			QList<collab_id_t> order;
+			for (const QJsonValue& v : op.value("ids").toArray()) { order.append(proto::parseId(v)); }
+			reorderTracks(container, order);
+		}
 	}
 	else if (type == proto::op::ClipAdd)
 	{
@@ -1056,6 +1168,14 @@ void CollabSession::applyRemoteStructureOp(const QJsonObject& op)
 	{
 		const collab_id_t id = proto::parseId(op.value("id"));
 		if (Clip* clip = findClip(id)) { applyClipFields(clip, without('c', id, op.value("v").toObject())); }
+	}
+	else if (type == proto::op::NotesSet)
+	{
+		auto gui = gui::getGUI();
+		if (gui && gui->getProjectNotes() && !m_pendingStructure.contains(pendingKey('n', 0, "text")))
+		{
+			gui->getProjectNotes()->setHtmlKeepingCursor(op.value("text").toString());
+		}
 	}
 	m_applyingRemote = false;
 }

@@ -25,6 +25,8 @@
 
 #include "ProjectNotes.h"
 
+#include <algorithm>
+
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -101,6 +103,26 @@ void ProjectNotes::clear()
 void ProjectNotes::setText( const QString & _text )
 {
 	m_edit->setHtml( _text );
+}
+
+
+
+
+QString ProjectNotes::html() const
+{
+	return m_edit->toHtml();
+}
+
+
+
+
+void ProjectNotes::setHtmlKeepingCursor(const QString& html)
+{
+	const int position = m_edit->textCursor().position();
+	m_edit->setHtml(html);
+	QTextCursor cursor = m_edit->textCursor();
+	cursor.setPosition(std::min(position, m_edit->document()->characterCount() - 1));
+	m_edit->setTextCursor(cursor);
 }
 
 
