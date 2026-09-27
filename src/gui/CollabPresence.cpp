@@ -61,6 +61,7 @@
 #include "ProjectNotes.h"
 #include "Song.h"
 #include "SongEditor.h"
+#include "TabWidget.h"
 #include "TrackContainerView.h"
 #include "TrackContentWidget.h"
 #include "TrackView.h"
@@ -343,6 +344,11 @@ private:
 				items.push_back({Item::Kind::Selection, {}, {}, *selection, user.color, user.name,
 					selection->adjusted(-1, -1, 1, 1)});
 			}
+			if (const auto tab = m_presence->tabHint(content, user.cursor))
+			{
+				// The collaborator is in this window, but on another tab: tint that tab
+				items.push_back({Item::Kind::Selection, {}, {}, *tab, user.color, user.name, tab->adjusted(-1, -1, 1, 1)});
+			}
 			if (m_presence->showPlayheads())
 			{
 				for (const auto& marker : m_presence->markers(content, user.play))
@@ -619,6 +625,10 @@ QJsonObject CollabPresence::localCursor() const
 		}
 	}
 	pixels(content);
+	if (auto window = dynamic_cast<InstrumentTrackWindow*>(content))
+	{
+		cursor.insert("tab", window->tabWidgetParent()->activeTab());
+	}
 	return cursor;
 }
 
@@ -720,7 +730,28 @@ std::optional<QPoint> CollabPresence::locate(QWidget* content, const QJsonObject
 		PianoRoll* editor = getGUI()->pianoRoll()->editor();
 		return editor->mapTo(content, editor->pointOfTickKey(cursor.value("tick").toInt(), cursor.value("key").toInt()));
 	}
+	if (auto window = dynamic_cast<InstrumentTrackWindow*>(content))
+	{
+		// Over another tab of the instrument window, the position means nothing here (see tabHint())
+		if (cursor.contains("tab") && cursor.value("tab").toInt() != window->tabWidgetParent()->activeTab())
+		{
+			return std::nullopt;
+		}
+	}
 	return pixels;
+}
+
+
+std::optional<QRect> CollabPresence::tabHint(QWidget* content, const QJsonObject& cursor) const
+{
+	auto window = dynamic_cast<InstrumentTrackWindow*>(content);
+	if (!window || !cursor.contains("tab") || cursor.value("w").toString() != windowKeyOf(content)) { return std::nullopt; }
+	TabWidget* tabs = window->tabWidgetParent();
+	const int tab = cursor.value("tab").toInt();
+	if (tab == tabs->activeTab()) { return std::nullopt; }
+	const QRect rect = tabs->tabRect(tab);
+	if (rect.isEmpty()) { return std::nullopt; }
+	return QRect{tabs->mapTo(content, rect.topLeft()), rect.size()};
 }
 
 

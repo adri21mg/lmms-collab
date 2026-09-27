@@ -56,6 +56,8 @@ public:
 	void setActiveTab(int idx);
 
 	int findTabAtPos(const QPoint& pos);
+	//! Where tab @p idx is drawn (empty if there is no such tab)
+	QRect tabRect(int idx) const;
 
 	inline int activeTab() const
 	{

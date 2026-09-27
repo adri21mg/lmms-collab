@@ -208,6 +208,22 @@ bool validFields(const QJsonObject& values, const std::vector<FieldSpec>& spec)
 }
 
 
+const std::vector<SongParam>& songParams()
+{
+	static const std::vector<SongParam> params = {{"bpm", "bpm", 10, 999},
+		{"num", "timesig_numerator", 1, 32}, {"den", "timesig_denominator", 1, 32},
+		{"vol", "mastervol", 0, 200}, {"pitch", "masterpitch", -60, 60}};
+	return params;
+}
+
+
+bool isValidParamPath(const QString& path)
+{
+	static const QRegularExpression re{"^(t|i|mt|fx):[0-9]{1,5}$"};
+	return re.match(path).hasMatch();
+}
+
+
 std::optional<QString> validColor(const QJsonValue& value)
 {
 	static const QRegularExpression re{"^#[0-9a-fA-F]{6}$"};
@@ -242,8 +258,9 @@ std::optional<QJsonObject> sanitizePresence(const QJsonObject& message)
 			if (!anchorRe.match(c.value("a").toString()).hasMatch()) { return std::nullopt; }
 			clean.insert("a", c.value("a"));
 		}
-		const std::array<std::tuple<const char*, double, double>, 4> fields{{
-			{"tick", -MaxTicks, MaxTicks}, {"key", 0, 200}, {"x", -MaxPixels, MaxPixels}, {"y", -MaxPixels, MaxPixels}}};
+		const std::array<std::tuple<const char*, double, double>, 5> fields{{
+			{"tick", -MaxTicks, MaxTicks}, {"key", 0, 200}, {"x", -MaxPixels, MaxPixels}, {"y", -MaxPixels, MaxPixels},
+			{"tab", 0, 64}}};
 		for (const auto& [name, min, max] : fields)
 		{
 			if (!c.contains(name)) { continue; }

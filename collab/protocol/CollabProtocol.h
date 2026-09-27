@@ -55,6 +55,13 @@
 //                                                                   Pattern Editor track; appended as the last pattern
 //     {op:"pattern.remove", id}
 //     {op:"notes.set",   text}                                     project notes (HTML)
+//     {op:"param.set",   owner, path, v}                           a knob/slider/button changed by hand
+//         owner "song": path bpm | num | den | vol | pitch (tempo, time signature, master volume/pitch)
+//         owner <trackId>: path "t:<n>" = n-th parameter of the track (instrument, envelopes, arpeggio...)
+//         or "fx:<n>" = n-th parameter of its effect chain, in LMMS' construction order (the same on every
+//         client, since all build the track from the same XML). The server only relays these...
+//     {op:"track.state", id, xml}                                  ...and stores the track's settings element
+//         (<instrumenttrack> / <sampletrack>) that the client of the latest change sends once knobs rest
 // Tracks live in the "song" container (Song Editor) or the "patternstore" container (Pattern Editor).
 // Pattern N is the N-th pattern track in song order; its content is the N-th clip of every Pattern Editor
 // track, so reordering pattern tracks (track.order) also reorders those clips.
@@ -108,6 +115,7 @@ inline constexpr auto Error = "error";
  *          "head:<trackId>" (x, y = pixels within the track's header),
  *          "chan:<n>" (x, y = pixels within mixer channel n), "fx:<n>" (pixels within the effects of channel n);
  *          none: x, y pixels in the window. Piano Roll: tick + key
+ *       tab: the tab shown in an instrument window (the cursor is only drawn over the same tab)
  *   play: null or {song, pattern, pref?, playing, mode?, tick?, ref?}
  *       song / pattern: positions of the Song Editor and Pattern Editor timelines (where Play starts),
  *       pref: the pattern shown in the Pattern Editor,
@@ -135,7 +143,25 @@ inline constexpr auto ClipSet = "clip.set";
 inline constexpr auto PatternAdd = "pattern.add";
 inline constexpr auto PatternRemove = "pattern.remove";
 inline constexpr auto NotesSet = "notes.set";
+inline constexpr auto ParamSet = "param.set";
+inline constexpr auto TrackState = "track.state";
 } // namespace op
+
+//! Owner of the song-wide parameters in param.set
+inline constexpr auto SongOwner = "song";
+
+//! A song-wide parameter: its path in param.set, its attribute in <head> and its range
+struct SongParam
+{
+	const char* path;
+	const char* attribute;
+	int min;
+	int max;
+};
+const std::vector<SongParam>& songParams();
+
+//! "t:<n>" or "fx:<n>"
+bool isValidParamPath(const QString& path);
 
 //! Track containers: the Song Editor and the Pattern Editor
 inline constexpr auto SongContainer = "song";

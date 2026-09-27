@@ -31,7 +31,9 @@
 #include <QDomDocument>
 #include <QFile>
 #include <QGuiApplication>
+#include <QJsonDocument>
 #include <QPointer>
+#include <QTime>
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTextStream>
@@ -175,11 +177,16 @@ CollabSession* CollabSession::instance()
 
 CollabSession::CollabSession() :
 	m_txQueueTimer(new QTimer(this)),
-	m_structureTimer(new QTimer(this))
+	m_structureTimer(new QTimer(this)),
+	m_trackStateTimer(new QTimer(this))
 {
 	m_txQueueTimer->setSingleShot(true);
 	connect(m_txQueueTimer, &QTimer::timeout, this, &CollabSession::processTxQueue);
-	connect(m_structureTimer, &QTimer::timeout, this, &CollabSession::flushStructure);
+	connect(m_structureTimer, &QTimer::timeout, this, [this] {
+		flushStructure();
+		flushParams();
+	});
+	connect(m_trackStateTimer, &QTimer::timeout, this, &CollabSession::sendTrackStates);
 }
 
 
@@ -198,6 +205,11 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 	disconnectFromServer();
 	m_user = user;
 	m_color = color;
+	const QString logDir = ConfigManager::inst()->workingDir() + "collab/";
+	QDir{}.mkpath(logDir);
+	m_log = std::make_unique<QFile>(logDir + "session.log");
+	if (!m_log->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) { m_log.reset(); }
+	log(QString{"connect %1:%2 as %3, project %4"}.arg(host).arg(port).arg(user, project));
 	m_project = project;
 	m_joinMode = mode;
 	m_seq = 0;
@@ -225,6 +237,12 @@ void CollabSession::disconnectFromServer()
 	m_pendingStructure.clear();
 	m_gestures.clear();
 	m_openGesture.clear();
+	m_paramIndex.clear();
+	m_paramBaseline.clear();
+	m_pendingParams.clear();
+	m_trackParams.clear();
+	m_ctxParamTracks.clear();
+	m_openParamGesture.clear();
 	m_txQueue.clear();
 	m_txQueueTimer->stop();
 	m_decoder = proto::FrameDecoder{};
@@ -265,7 +283,26 @@ void CollabSession::send(const QJsonObject& message)
 
 void CollabSession::sendOps(const QJsonArray& ops)
 {
+	if (m_log)
+	{
+		QStringList summary;
+		for (const QJsonValue& op : ops)
+		{
+			QJsonObject o = op.toObject();
+			o.remove("xml"); // large and not needed to follow what happens
+			summary.append(QString::fromUtf8(QJsonDocument{o}.toJson(QJsonDocument::Compact)));
+		}
+		log(QString{"send ctx %1: %2"}.arg(m_nextCtx).arg(summary.join(" ")));
+	}
 	send({{"t", proto::msg::Tx}, {"ctx", m_nextCtx++}, {"ops", ops}});
+}
+
+
+void CollabSession::log(const QString& line)
+{
+	if (!m_log) { return; }
+	m_log->write(QString{"%1 %2\n"}.arg(QTime::currentTime().toString("hh:mm:ss.zzz"), line).toUtf8());
+	m_log->flush();
 }
 
 
@@ -378,6 +415,9 @@ void CollabSession::startTracking()
 
 	ProjectJournal::setHook(this);
 	m_structureTimer->start(StructureIntervalMs);
+	refreshParamIndex();
+	flushParams(); // takes the current values as baseline
+	m_trackStateTimer->start(250);
 
 	// Loading another project replaces every shared object: the session cannot continue
 	m_trackConnections.append(connect(Engine::getSong(), &Song::projectLoaded, this, [this] {
@@ -392,6 +432,7 @@ void CollabSession::startTracking()
 void CollabSession::stopTracking()
 {
 	m_structureTimer->stop();
+	m_trackStateTimer->stop();
 	ProjectJournal::setHook(nullptr);
 	for (const auto& c : m_trackConnections) { disconnect(c); }
 	m_trackConnections.clear();
@@ -403,6 +444,7 @@ void CollabSession::flushAll()
 {
 	if (m_state != State::Live) { return; }
 	flushStructure();
+	flushParams();
 	std::vector<MidiClip*> clips;
 	for (const auto& [clip, tracker] : m_trackers) { clips.push_back(clip); }
 	for (MidiClip* clip : clips) { flushClip(clip); }
@@ -445,11 +487,23 @@ void CollabSession::applyTx(const QJsonObject& message)
 		{
 			it = it.value() <= ctx ? m_pendingStructure.erase(it) : std::next(it);
 		}
+		paramsAcknowledged(ctx, m_seq);
 		return;
 	}
 
 	const QJsonArray ops = message.value("ops").toArray();
 	if (ops.isEmpty()) { return; }
+	if (m_log)
+	{
+		QStringList summary;
+		for (const QJsonValue& op : ops)
+		{
+			QJsonObject o = op.toObject();
+			o.remove("xml");
+			summary.append(QString::fromUtf8(QJsonDocument{o}.toJson(QJsonDocument::Compact)));
+		}
+		log(QString{"recv seq %1 from %2: %3"}.arg(m_seq).arg(message.value("clientId").toString(), summary.join(" ")));
+	}
 
 	// Send our own unsent edits first, so every baseline only holds synchronized state
 	flushAll();
@@ -467,7 +521,15 @@ void CollabSession::applyTx(const QJsonObject& message)
 	for (const QJsonValue& value : ops)
 	{
 		const QJsonObject op = value.toObject();
-		if (op.value("op").toString().startsWith("note."))
+		const QString type = op.value("op").toString();
+		if (type == proto::op::ParamSet)
+		{
+			flushNoteGroup();
+			applyRemoteParam(op, m_seq);
+			continue;
+		}
+		if (type == proto::op::TrackState) { continue; } // for the server's copy; we have every change already
+		if (type.startsWith("note."))
 		{
 			const collab_id_t clipId = proto::parseId(op.value("clip"));
 			if (clipId != groupClip) { flushNoteGroup(); }
@@ -485,7 +547,11 @@ void CollabSession::applyTx(const QJsonObject& message)
 	// covers values derived from remote changes (e.g. a clip's length follows its notes): not echoed.
 	m_structure = currentStructure();
 	syncNoteTracking();
-	if (structureChanged) { Engine::getSong()->setModified(); }
+	if (structureChanged)
+	{
+		refreshParamIndex(); // tracks may have come or gone
+		Engine::getSong()->setModified();
+	}
 	Engine::projectJournal()->setJournalling(journalling);
 }
 
@@ -1211,6 +1277,7 @@ bool CollabSession::isShared(JournallingObject* jo) const
 		return m_structure.clips.contains(clip->collabId()) || m_baselines.contains(clip->collabId());
 	}
 	if (auto track = dynamic_cast<Track*>(jo)) { return m_structure.tracks.contains(track->collabId()); }
+	if (auto model = dynamic_cast<AutomatableModel*>(jo)) { return paramKeyOf(model).has_value(); }
 	return false;
 }
 
@@ -1238,6 +1305,11 @@ std::uint64_t CollabSession::checkPointAdded(JournallingObject* jo)
 			gesture.clipXml.insert(clip->collabId(), serialize(clip));
 		}
 	}
+	else if (auto model = dynamic_cast<AutomatableModel*>(jo))
+	{
+		// A knob, slider, button or combo box: the gesture collects this parameter's changes
+		m_openParamGesture[*paramKeyOf(model)] = token;
+	}
 	while (m_gestures.size() > 1000) { m_gestures.erase(m_gestures.begin()); } // the journal keeps 100 anyway
 	return token;
 }
@@ -1254,6 +1326,10 @@ bool CollabSession::restore(JournallingObject* jo, std::uint64_t token, bool und
 		{
 			it = it.value() == token ? m_openGesture.erase(it) : std::next(it);
 		}
+		for (auto it = m_openParamGesture.begin(); it != m_openParamGesture.end();)
+		{
+			it = it.value() == token ? m_openParamGesture.erase(it) : std::next(it);
+		}
 		replayGesture(g->second, undo);
 	}
 	return true;
@@ -1267,8 +1343,16 @@ void CollabSession::restored(JournallingObject*)
 }
 
 
-CollabSession::Gesture* CollabSession::openGestureFor(Kind kind, collab_id_t parent, collab_id_t id)
+CollabSession::Gesture* CollabSession::openGestureFor(Kind kind, collab_id_t parent, collab_id_t id,
+	const QString& path)
 {
+	if (kind == Kind::Param)
+	{
+		const auto open = m_openParamGesture.constFind({parent, path});
+		if (open == m_openParamGesture.cend()) { return nullptr; }
+		const auto g = m_gestures.find(*open);
+		return g != m_gestures.end() ? &g->second : nullptr;
+	}
 	auto find = [this](Kind k, collab_id_t objectId) -> Gesture* {
 		const auto open = m_openGesture.constFind({static_cast<int>(k), objectId});
 		if (open == m_openGesture.cend()) { return nullptr; }
@@ -1285,18 +1369,19 @@ CollabSession::Gesture* CollabSession::openGestureFor(Kind kind, collab_id_t par
 		if (Gesture* g = find(Kind::Clip, parent)) { return g; }
 		if (const Clip* clip = findClip(parent)) { return find(Kind::Track, clip->getTrack()->collabId()); }
 		return nullptr;
+	case Kind::Param: break;
 	}
 	return nullptr;
 }
 
 
 void CollabSession::record(Kind kind, collab_id_t parent, collab_id_t id, const ObjectState& before,
-	const ObjectState& after)
+	const ObjectState& after, const QString& path)
 {
 	if (!m_recordGestures) { return; }
-	Gesture* gesture = openGestureFor(kind, parent, id);
+	Gesture* gesture = openGestureFor(kind, parent, id, path);
 	if (!gesture) { return; }
-	const ObjectKey key{kind, parent, id};
+	const ObjectKey key{kind, parent, id, path};
 	if (!gesture->before.contains(key)) { gesture->before.insert(key, before); }
 	gesture->after.insert(key, after);
 }
@@ -1340,6 +1425,13 @@ CollabSession::ObjectState CollabSession::currentState(const ObjectKey& key) con
 			if (const Note* note = clip->findNote(key.id)) { return NoteState::of(*note).toJson(); }
 		}
 		return std::nullopt;
+	case Kind::Param:
+		// findParam() may rebuild the parameter index, which does not change the session's state
+		if (const AutomatableModel* model = const_cast<CollabSession*>(this)->findParam({key.parent, key.path}))
+		{
+			return QJsonObject{{"v", model->value<float>()}};
+		}
+		return std::nullopt;
 	}
 	return std::nullopt;
 }
@@ -1355,7 +1447,7 @@ void CollabSession::replayGesture(Gesture& gesture, bool undo)
 	{
 		auto guard = Engine::audioEngine()->requestChangesGuard();
 		// Clips before notes: a note can only come back into a clip that exists
-		for (const Kind kind : {Kind::Track, Kind::Clip, Kind::Note})
+		for (const Kind kind : {Kind::Param, Kind::Track, Kind::Clip, Kind::Note})
 		{
 			for (auto it = mineStates.cbegin(); it != mineStates.cend(); ++it)
 			{
@@ -1424,7 +1516,14 @@ void CollabSession::replayGesture(Gesture& gesture, bool undo)
 						}
 					}
 					if (revert.isEmpty()) { continue; }
-					if (key.kind == Kind::Track) { applyTrackFields(findTrack(key.id), revert); }
+					if (key.kind == Kind::Param)
+					{
+						if (AutomatableModel* model = findParam({key.parent, key.path}))
+						{
+							model->setValue(static_cast<float>(revert.value("v").toDouble()));
+						}
+					}
+					else if (key.kind == Kind::Track) { applyTrackFields(findTrack(key.id), revert); }
 					else if (key.kind == Kind::Clip) { applyClipFields(findClip(key.id), revert); }
 					else if (MidiClip* clip = findMidiClip(key.parent))
 					{

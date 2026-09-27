@@ -33,10 +33,13 @@
 #include <QHash>
 #include <QJsonArray>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QJsonObject>
 #include <QObject>
+#include <QPointer>
 #include <QSet>
 
+#include "AutomatableModel.h"
 #include "CollabId.h"
 #include "CollabProtocol.h"
 #include "ProjectJournal.h"
@@ -48,6 +51,7 @@ class QTimer;
 namespace lmms
 {
 
+class AutomatableModel;
 class Clip;
 class MidiClip;
 class Note;
@@ -123,6 +127,11 @@ public:
 	//! Sends local changes right away instead of at the next throttle tick (used by tests)
 	void flushAll();
 
+	//! Diagnostics: "path fingerprint name" of every synchronized parameter of a track
+	static QStringList describeParams(Track* track);
+	//! Diagnostics: appends a line to <workspace>/collab/session.log (recreated on every connection)
+	void log(const QString& line);
+
 signals:
 	void stateChanged();
 	void errorOccurred(const QString& message);
@@ -159,17 +168,35 @@ private:
 		std::optional<QString> notes;             //!< project notes (only with a GUI)
 	};
 
-	enum class Kind { Track, Clip, Note };
+	enum class Kind { Track, Clip, Note, Param };
 	struct ObjectKey
 	{
 		Kind kind;
-		collab_id_t parent; //!< clip of a note, track of a clip, 0 for tracks
+		collab_id_t parent; //!< clip of a note, track of a clip, track of a parameter (0: song), 0 for tracks
 		collab_id_t id;
+		QString path = {};  //!< parameter path (see proto::op::ParamSet)
 		friend bool operator==(const ObjectKey&, const ObjectKey&) = default;
 		friend size_t qHash(const ObjectKey& k, size_t seed = 0)
 		{
-			return qHashMulti(seed, static_cast<int>(k.kind), k.parent, k.id);
+			return qHashMulti(seed, static_cast<int>(k.kind), k.parent, k.id, k.path);
 		}
+	};
+
+	//! A synchronized parameter: owner track (0 for the song) and its path
+	using ParamKey = QPair<collab_id_t, QString>;
+	//! Parameters of one track by path and the other way round (rebuilt regularly: plugins may add some)
+	struct ParamIndex
+	{
+		std::map<QString, QPointer<AutomatableModel>> byPath;
+		QHash<const AutomatableModel*, QString> byModel;
+	};
+	//! Who made the latest change to a track's parameters, to know who stores its settings on the server
+	struct TrackParamState
+	{
+		qint64 lastSeq = 0;
+		bool mine = false;
+		bool dirty = false;
+		QElapsedTimer lastChange;
 	};
 	using ObjectState = std::optional<QJsonObject>; //!< nullopt: the object does not exist
 
@@ -235,9 +262,24 @@ private:
 	//! Project notes currently shown, if there is a GUI
 	static std::optional<QString> currentNotes();
 
+	// Parameters (knobs, sliders, buttons, combo boxes of tracks, instruments, effects; song tempo etc.)
+	//! Parameters of a track: "t:<n>" in its own object tree, "fx:<n>" in its effect chain
+	static std::vector<std::pair<QString, AutomatableModel*>> enumerateParams(Track* track);
+	static std::vector<std::pair<QString, AutomatableModel*>> songParamModels();
+	void refreshParamIndex();
+	//! Compares parameter values with their baseline and sends what the user changed by hand
+	void flushParams();
+	void applyRemoteParam(const QJsonObject& op, qint64 seq);
+	//! Sends the settings of tracks whose knobs came to rest, if this client made their latest change
+	void sendTrackStates();
+	void paramsAcknowledged(qint64 ctx, qint64 seq);
+	std::optional<ParamKey> paramKeyOf(const AutomatableModel* model) const;
+	AutomatableModel* findParam(const ParamKey& key);
+
 	// Undo
-	Gesture* openGestureFor(Kind kind, collab_id_t parent, collab_id_t id);
-	void record(Kind kind, collab_id_t parent, collab_id_t id, const ObjectState& before, const ObjectState& after);
+	Gesture* openGestureFor(Kind kind, collab_id_t parent, collab_id_t id, const QString& path = {});
+	void record(Kind kind, collab_id_t parent, collab_id_t id, const ObjectState& before, const ObjectState& after,
+		const QString& path = {});
 	//! Reverts (undo) or re-applies (redo) this user's changes of a gesture where nobody changed them since
 	void replayGesture(Gesture& gesture, bool undo);
 	ObjectState currentState(const ObjectKey& key) const;
@@ -276,6 +318,16 @@ private:
 	QTimer* m_txQueueTimer;
 	QTimer* m_structureTimer;
 	QElapsedTimer m_notesSent; //!< notes are sent at most twice per second
+
+	QHash<collab_id_t, ParamIndex> m_paramIndex;       //!< per shared track
+	QElapsedTimer m_paramIndexAge;
+	QHash<ParamKey, float> m_paramBaseline;            //!< last synchronized value of every parameter
+	QHash<ParamKey, qint64> m_pendingParams;           //!< our unacknowledged writes (ctx)
+	QHash<collab_id_t, TrackParamState> m_trackParams;
+	QHash<qint64, QSet<collab_id_t>> m_ctxParamTracks; //!< tracks whose parameters a local tx changed
+	QTimer* m_trackStateTimer;
+	QHash<ParamKey, std::uint64_t> m_openParamGesture;
+	std::unique_ptr<QFile> m_log;
 
 	std::map<std::uint64_t, Gesture> m_gestures;                      //!< by journal token
 	QHash<QPair<int, collab_id_t>, std::uint64_t> m_openGesture;      //!< (kind, id) -> gesture collecting changes

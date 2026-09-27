@@ -25,6 +25,7 @@
 #include "ProjectState.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include <QJsonArray>
 
@@ -342,7 +343,30 @@ bool ProjectState::apply(const QJsonObject& op)
 	if (type.startsWith("clip.")) { return applyClipOp(type, op); }
 	if (type.startsWith("pattern.")) { return applyPatternOp(type, op); }
 	if (type == proto::op::NotesSet) { return applyNotesOp(op); }
+	if (type == proto::op::ParamSet) { return applyParamOp(op); }
 	return false;
+}
+
+
+bool ProjectState::applyParamOp(const QJsonObject& op)
+{
+	const QJsonValue value = op.value("v");
+	if (!value.isDouble() || !std::isfinite(value.toDouble())) { return false; }
+	const QString path = op.value("path").toString();
+
+	if (op.value("owner").toString() == proto::SongOwner)
+	{
+		const auto& params = proto::songParams();
+		const auto param = std::find_if(params.begin(), params.end(), [&](const auto& p) { return path == p.path; });
+		const double v = value.toDouble();
+		if (param == params.end() || v != std::floor(v) || v < param->min || v > param->max) { return false; }
+		m_doc.documentElement().firstChildElement("head").setAttribute(param->attribute, static_cast<int>(v));
+		return true;
+	}
+
+	// Track parameters are only relayed; the track's settings are stored by track.state
+	const Id trackId = proto::parseId(op.value("owner"));
+	return (m_songTracks.contains(trackId) || m_patternEditorTracks.contains(trackId)) && proto::isValidParamPath(path);
 }
 
 
@@ -457,6 +481,24 @@ bool ProjectState::applyTrackOp(const QString& type, const QJsonObject& op)
 		// Pattern tracks are removed with pattern.remove, automation tracks are not shared yet
 		if (!isContentTrackType(track.attribute("type").toInt())) { return false; }
 		removeTrackElement(trackId);
+		return true;
+	}
+
+	if (type == proto::op::TrackState)
+	{
+		// The settings element of the track (instrument, its parameters and effects), replacing the old one
+		const int trackType = track.attribute("type").toInt();
+		const QString tag = trackType == InstrumentTrack ? "instrumenttrack" : trackType == SampleTrack ? "sampletrack" : "";
+		if (tag.isEmpty()) { return false; }
+		QDomDocument fragment;
+		if (!op.value("xml").isString() || !fragment.setContent(op.value("xml").toString())) { return false; }
+		QDomElement settings = fragment.documentElement();
+		if (settings.tagName() != tag || !settings.elementsByTagName("track").isEmpty()) { return false; }
+		normalize(settings);
+		QDomElement imported = m_doc.importNode(settings, true).toElement();
+		const QDomElement old = track.firstChildElement(tag);
+		if (old.isNull()) { track.insertBefore(imported, track.firstChild()); }
+		else { track.replaceChild(imported, old); }
 		return true;
 	}
 

@@ -31,6 +31,8 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include "AutomationClip.h"
+#include "AutomationTrack.h"
 #include "CollabProtocol.h"
 #include "CollabSession.h"
 #include "Engine.h"
@@ -685,8 +687,130 @@ private slots:
 		QVERIFY2(m_peer.nextForeignTx(500).isEmpty(), "no echo of the remote removal");
 	}
 
+	// ---- M4a: parameters ----
+
+	//! A track created here and the same track rebuilt from its XML (as another client does) must number
+	//! their parameters identically, or remote knob changes cannot find their knob
+	void testParamPathsMatchAcrossClients()
+	{
+		auto song = Engine::getSong();
+		auto original = dynamic_cast<InstrumentTrack*>(Track::create(Track::Type::Instrument, song));
+		original->loadInstrument("tripleoscillator");
+		QDomDocument doc;
+		QDomElement parent = doc.createElement("clonedtrack");
+		doc.appendChild(parent);
+		original->saveState(doc, parent);
+		Track* rebuilt = Track::create(parent.firstChildElement(), song);
+
+		const QStringList a = CollabSession::describeParams(original);
+		const QStringList b = CollabSession::describeParams(rebuilt);
+		for (qsizetype i = 0; i < std::max(a.size(), b.size()); ++i)
+		{
+			const QString left = a.value(i), right = b.value(i);
+			if (left != right) { qWarning("param %lld: [%s] vs [%s]", static_cast<long long>(i), qPrintable(left), qPrintable(right)); }
+		}
+		QVERIFY2(a.size() > 50, "the instrument's parameters are included");
+		QCOMPARE(a, b);
+		delete rebuilt;
+		delete original;
+	}
+
+	void testParamsSync()
+	{
+		m_peer.drain();
+		auto track = dynamic_cast<InstrumentTrack*>(m_clip->getTrack());
+		const QString owner = proto::idString(track->collabId());
+
+		// A knob turned by hand reaches the peer, identified by its path in the track
+		track->volumeModel()->setValue(42);
+		auto op = m_peer.nextForeignOp("param.set");
+		QCOMPARE(op.value("owner").toString(), owner);
+		QCOMPARE(op.value("v").toDouble(), 42.0);
+		const QString volumePath = op.value("path").toString();
+		QVERIFY(volumePath.startsWith("t:"));
+
+		// The peer turns it: applied here, not echoed
+		m_peer.sendOps({QJsonObject{{"op", "param.set"}, {"owner", owner}, {"path", volumePath}, {"v", 77}}});
+		QTRY_COMPARE(track->volumeModel()->value(), 77.0f);
+		QVERIFY2(m_peer.nextForeignOp("param.set", 400).isEmpty(), "no echo of remote parameter changes");
+
+		// The tuning tab (microtuner) is part of the track too
+		track->microtuner()->enabledModel()->setValue(true);
+		QVERIFY(m_peer.nextForeignOp("param.set").value("path").toString().startsWith("mt:"));
+
+		// Song settings: tempo and time signature, stored by the server too. LMMS keeps empty global
+		// automation clips for them (as in the GUI); empty clips do not make them "automated".
+		AutomationClip::globalAutomationClip(&Engine::getSong()->tempoModel())->clear();
+		Engine::getSong()->tempoModel().setValue(150);
+		op = m_peer.nextForeignOp("param.set");
+		QCOMPARE(op.value("owner").toString(), QString{"song"});
+		QCOMPARE(op.value("path").toString(), QString{"bpm"});
+		m_peer.sendOps({QJsonObject{{"op", "param.set"}, {"owner", "song"}, {"path", "num"}, {"v", 3}}});
+		QTRY_COMPARE(Engine::getSong()->getTimeSigModel().getNumerator(), 3);
+		QDomDocument snapshot = serverSnapshot();
+		QCOMPARE(snapshot.documentElement().firstChildElement("head").attribute("bpm"), QString{"150"});
+		QCOMPARE(snapshot.documentElement().firstChildElement("head").attribute("timesig_numerator"), QString{"3"});
+
+		// Values driven by automation are not the user's doing: not sent
+		auto automationTrack = Track::create(Track::Type::Automation, Engine::getSong());
+		auto automation = new AutomationClip(dynamic_cast<AutomationTrack*>(automationTrack));
+		automation->addObject(track->panningModel());
+		m_peer.drain();
+		track->panningModel()->setValue(-30);
+		QVERIFY2(m_peer.nextForeignOp("param.set", 500).isEmpty(), "automated parameters are not sent");
+		delete automationTrack;
+
+		// Once the knobs rest, the client of the latest change stores the track's settings on the server
+		m_peer.drain();
+		track->volumeModel()->setValue(55);
+		m_peer.nextForeignOp("param.set");
+		const auto state = m_peer.nextForeignOp("track.state", 3000);
+		QVERIFY2(!state.isEmpty(), "settings sent once the knob rested");
+		QVERIFY(state.value("xml").toString().startsWith("<instrumenttrack"));
+		QDomElement stored;
+		const QDomNodeList tracks = serverSnapshot().elementsByTagName("track");
+		for (int i = 0; i < tracks.size(); ++i)
+		{
+			if (tracks.at(i).toElement().attribute("cid") == owner) { stored = tracks.at(i).toElement(); }
+		}
+		QCOMPARE(stored.firstChildElement("instrumenttrack").attribute("vol"), QString{"55"});
+
+		// When the latest change is the peer's, storing is the peer's job, not ours
+		m_peer.sendOps({QJsonObject{{"op", "param.set"}, {"owner", owner}, {"path", volumePath}, {"v", 60}}});
+		QTRY_COMPARE(track->volumeModel()->value(), 60.0f);
+		QVERIFY2(m_peer.nextForeignOp("track.state", 1800).isEmpty(), "only the author of the latest change stores");
+
+		// Undo is per user for knobs too: my Ctrl+Z does not undo the peer's later turn
+		auto journal = Engine::projectJournal();
+		track->volumeModel()->addJournalCheckPoint();
+		track->volumeModel()->setValue(20);
+		m_peer.nextForeignOp("param.set");
+		m_peer.sendOps({QJsonObject{{"op", "param.set"}, {"owner", owner}, {"path", volumePath}, {"v", 90}}});
+		QTRY_COMPARE(track->volumeModel()->value(), 90.0f);
+		m_peer.drain();
+		journal->undo();
+		QCOMPARE(track->volumeModel()->value(), 90.0f);
+		// ...but it undoes my own turn when nobody touched it afterwards
+		track->volumeModel()->addJournalCheckPoint();
+		track->volumeModel()->setValue(33);
+		m_peer.nextForeignOp("param.set");
+		journal->undo();
+		QCOMPARE(track->volumeModel()->value(), 90.0f);
+		QCOMPARE(m_peer.nextForeignOp("param.set").value("v").toDouble(), 90.0);
+	}
+
 private:
 	QString m_newTrackXml;
+
+	QDomDocument serverSnapshot()
+	{
+		FakePeer watcher;
+		QDomDocument doc;
+		if (!watcher.connectTo(m_port)) { return doc; }
+		watcher.send({{"t", "open"}, {"project", "session-test"}});
+		doc.setContent(watcher.next("joined").value("mmp").toString());
+		return doc;
+	}
 
 	static QString toString(const QDomElement& e)
 	{

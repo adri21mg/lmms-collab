@@ -62,6 +62,7 @@ private:
 	bool applyClipOp(const QString& type, const QJsonObject& op);
 	bool applyPatternOp(const QString& type, const QJsonObject& op);
 	bool applyNotesOp(const QJsonObject& op);
+	bool applyParamOp(const QJsonObject& op);
 
 	//! Container element and track set for "song" / "patternstore"; null if unknown
 	QDomElement containerElement(const QString& name) const;

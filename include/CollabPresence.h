@@ -100,6 +100,8 @@ public:
 	std::vector<Marker> markers(QWidget* content, const QJsonObject& play) const;
 	//! The mixer channel a remote user has selected, if @p content is the mixer and it is visible
 	std::optional<QRect> mixerSelection(QWidget* content, const QJsonObject& view) const;
+	//! The tab of an instrument window a remote user is in, if this user shows another tab of it
+	std::optional<QRect> tabHint(QWidget* content, const QJsonObject& cursor) const;
 
 signals:
 	void usersChanged();

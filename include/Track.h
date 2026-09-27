@@ -267,6 +267,7 @@ public:
 	}
 	
 	BoolModel* getMutedModel();
+	BoolModel* getSoloModel() { return &m_soloModel; }
 
 public slots:
 	virtual void setName(const QString& newName);

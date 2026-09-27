@@ -147,6 +147,19 @@ int TabWidget::findTabAtPos(const QPoint& pos)
 }
 
 
+QRect TabWidget::tabRect(int idx) const
+{
+	// Same layout as findTabAtPos()
+	int cx = ((m_caption == "") ? 4 : 14) + fontMetrics().horizontalAdvance(m_caption);
+	for (auto it = m_widgets.begin(); it != m_widgets.end(); ++it)
+	{
+		if (it.key() == idx) { return QRect{cx, 1, it->nwidth, m_tabbarHeight - 2}; }
+		cx += it->nwidth;
+	}
+	return {};
+}
+
+
 // Overload the QWidget::event handler to display tooltips (from https://doc.qt.io/qt-4.8/qt-widgets-tooltips-example.html)
 bool TabWidget::event(QEvent* event)
 {
