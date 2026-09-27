@@ -157,6 +157,13 @@ public:
 
 	int quantization() const;
 
+	//! Widget position of a time and key (for showing collaborators' cursors)
+	QPoint pointOfTickKey(int tick, int key) const;
+	//! Time and key at a widget position
+	std::pair<int, int> tickKeyAt(const QPoint& point) const;
+	//! Visible area of the note grid, in widget coordinates
+	QRect noteGridRect() const;
+
 protected:
 	enum class QuantizeAction
 	{
@@ -565,6 +572,7 @@ class PianoRollWindow : public Editor, SerializingObject
 public:
 	PianoRollWindow();
 
+	PianoRoll* editor() const { return m_editor; }
 	const MidiClip* currentMidiClip() const;
 	void setCurrentMidiClip( MidiClip* clip );
 	void setGhostMidiClip( MidiClip* clip );

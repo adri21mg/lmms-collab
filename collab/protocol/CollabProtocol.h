@@ -31,11 +31,14 @@
 //     create  {project, mmp}                         create a shared project from the client's song
 //     open    {project}                              join an existing shared project
 //     tx      {ctx, ops[]}                           one local edit gesture (client-local counter ctx)
+//     presence {cursor, play}                        where this user is; never stored (see sanitizePresence)
 //   server -> client
 //     welcome {proto, clientId}
 //     joined  {project, seq, mmp?}                   mmp is omitted for the creator (it already has the song)
 //     tx      {seq, clientId, ctx, ops[]}            accepted transaction, sent to every client incl. sender
+//     presence {clientId, user, color, cursor, play} another user's presence, or {clientId, gone:true}
 //     error   {message}
+// hello also carries the user's color ("#rrggbb").
 //
 // Ops inside a tx (field names match LMMS' XML attributes):
 //     {op:"note.add",    clip, id, v:{key,pos,len,vol,pan,type}}   all fields required
@@ -91,8 +94,31 @@ inline constexpr auto Create = "create";
 inline constexpr auto Open = "open";
 inline constexpr auto Joined = "joined";
 inline constexpr auto Tx = "tx";
+inline constexpr auto Presence = "presence";
 inline constexpr auto Error = "error";
 } // namespace msg
+
+/**
+ * Presence (decision M3): ephemeral, relayed by the server, never stored, never undone.
+ *   cursor: null (not over a shared window) or
+ *     {w: window, a?: anchor, tick?, key?, x?, y?}
+ *       w: "song" | "pattern:<patternTrackId>" | "pianoroll:<clipId>" | "instrument:<trackId>"
+ *          | "mixer" | "notes" | "controllers"
+ *       a: "track:<trackId>" (tick = time, y = 0..1 within the track row),
+ *          "head:<trackId>" (x, y = pixels within the track's header),
+ *          "chan:<n>" (x, y = pixels within mixer channel n), "fx:<n>" (pixels within the effects of channel n);
+ *          none: x, y pixels in the window. Piano Roll: tick + key
+ *   play: null or {song, pattern, pref?, playing, mode?, tick?, ref?}
+ *       song / pattern: positions of the Song Editor and Pattern Editor timelines (where Play starts),
+ *       pref: the pattern shown in the Pattern Editor,
+ *       while playing: mode "song" | "pattern" | "clip", tick, ref (pattern track or clip id)
+ *   view: null or {mixsel?: selected mixer channel}
+ * Musical positions (tick/key/track/channel) look right regardless of each user's zoom and scroll.
+ */
+//! Returns a copy with only valid, known fields, or nullopt if the message is malformed
+std::optional<QJsonObject> sanitizePresence(const QJsonObject& message);
+//! "#rrggbb", or nullopt
+std::optional<QString> validColor(const QJsonValue& value);
 
 namespace op
 {

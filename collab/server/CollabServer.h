@@ -29,6 +29,7 @@
 #include <memory>
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QObject>
 #include <QTimer>
 
@@ -70,7 +71,11 @@ private:
 		proto::FrameDecoder decoder;
 		QString clientId;
 		QString user;
+		QString color = "#cccccc";
 		Project* project = nullptr;
+		QJsonObject presence;          //!< last presence, for users who join later (never stored on disk)
+		QElapsedTimer presenceForwarded;
+		bool presencePending = false;
 	};
 
 	void onNewConnection();
@@ -80,10 +85,13 @@ private:
 	void handleCreate(Client& client, const QJsonObject& message);
 	void handleOpen(Client& client, const QJsonObject& message);
 	void handleTx(Client& client, const QJsonObject& message);
+	void handlePresence(Client& client, const QJsonObject& message);
+	//! Sends the presence of everybody else in the client's project to a client that just joined
+	void sendPresenceOfOthers(Client& client);
 
 	void send(Client& client, const QJsonObject& message);
 	void sendError(Client& client, const QString& text);
-	void broadcast(Project* project, const QJsonObject& message);
+	void broadcast(Project* project, const QJsonObject& message, const Client* except = nullptr);
 
 	Project* findOrLoadProject(const QString& name);
 	QString projectDir(const QString& name) const;

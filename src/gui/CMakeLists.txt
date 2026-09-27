@@ -2,6 +2,7 @@ SET(LMMS_SRCS
 	${LMMS_SRCS}
 	gui/ActionGroup.cpp
 	gui/CollabMenu.cpp
+	gui/CollabPresence.cpp
 	gui/AudioAlsaSetupWidget.cpp
 	gui/AudioDeviceSetupWidget.cpp
 	gui/AutomatableModelView.cpp

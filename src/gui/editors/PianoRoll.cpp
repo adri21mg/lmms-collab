@@ -1645,6 +1645,32 @@ int PianoRoll::noteEditLeft() const
 
 
 
+QPoint PianoRoll::pointOfTickKey(int tick, int key) const
+{
+	const int x = m_whiteKeyWidth + (tick - m_currentPosition.getTicks()) * m_ppb / TimePos::ticksPerBar();
+	return {x, yCoordOfKey(key) + m_keyLineHeight / 2};
+}
+
+
+
+
+std::pair<int, int> PianoRoll::tickKeyAt(const QPoint& point) const
+{
+	const int tick = (point.x() - m_whiteKeyWidth) * TimePos::ticksPerBar() / m_ppb + m_currentPosition.getTicks();
+	return {tick, getKey(point.y())};
+}
+
+
+
+
+QRect PianoRoll::noteGridRect() const
+{
+	return QRect{QPoint{noteEditLeft(), PR_TOP_MARGIN}, QPoint{noteEditRight(), keyAreaBottom() - 1}};
+}
+
+
+
+
 int PianoRoll::keyAreaTop() const
 {
 	return PR_TOP_MARGIN;

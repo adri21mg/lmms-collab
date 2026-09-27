@@ -193,10 +193,11 @@ CollabSession::~CollabSession()
 // Connection
 
 void CollabSession::connectToServer(const QString& host, quint16 port, const QString& user,
-	const QString& project, JoinMode mode)
+	const QString& project, JoinMode mode, const QString& color)
 {
 	disconnectFromServer();
 	m_user = user;
+	m_color = color;
 	m_project = project;
 	m_joinMode = mode;
 	m_seq = 0;
@@ -204,7 +205,7 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 
 	m_socket = std::make_unique<QTcpSocket>();
 	connect(m_socket.get(), &QTcpSocket::connected, this, [this] {
-		send({{"t", proto::msg::Hello}, {"proto", proto::Version}, {"user", m_user}});
+		send({{"t", proto::msg::Hello}, {"proto", proto::Version}, {"user", m_user}, {"color", m_color}});
 	});
 	connect(m_socket.get(), &QTcpSocket::readyRead, this, &CollabSession::onReadyRead);
 	connect(m_socket.get(), &QTcpSocket::errorOccurred, this, [this] {
@@ -227,6 +228,7 @@ void CollabSession::disconnectFromServer()
 	m_txQueue.clear();
 	m_txQueueTimer->stop();
 	m_decoder = proto::FrameDecoder{};
+	emit presenceCleared();
 	if (m_socket)
 	{
 		// This may run inside one of the socket's own signal handlers, so delete it later
@@ -310,7 +312,25 @@ void CollabSession::handleMessage(const QJsonObject& message)
 		m_txQueue.append(message);
 		processTxQueue();
 	}
+	else if (t == proto::msg::Presence)
+	{
+		// Presence never touches the project, so it is not queued behind mouse gestures
+		if (m_state == State::Live) { emit presenceReceived(message); }
+	}
 	else if (t == proto::msg::Error) { fail(message.value("message").toString()); }
+}
+
+
+void CollabSession::sendPresence(const QJsonObject& presence)
+{
+	if (m_state != State::Live) { return; }
+	QJsonObject message{{"t", proto::msg::Presence}};
+	for (const char* part : {"cursor", "play", "view"})
+	{
+		const QJsonObject value = presence.value(part).toObject();
+		message.insert(part, value.isEmpty() ? QJsonValue{QJsonValue::Null} : QJsonValue{value});
+	}
+	send(message);
 }
 
 

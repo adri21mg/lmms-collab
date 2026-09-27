@@ -25,6 +25,7 @@
 #include "CollabProtocol.h"
 
 #include <algorithm>
+#include <tuple>
 
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -204,6 +205,102 @@ bool validFields(const QJsonObject& values, const std::vector<FieldSpec>& spec)
 		}
 	}
 	return true;
+}
+
+
+std::optional<QString> validColor(const QJsonValue& value)
+{
+	static const QRegularExpression re{"^#[0-9a-fA-F]{6}$"};
+	if (!value.isString() || !re.match(value.toString()).hasMatch()) { return std::nullopt; }
+	return value.toString().toLower();
+}
+
+
+std::optional<QJsonObject> sanitizePresence(const QJsonObject& message)
+{
+	static const QRegularExpression windowRe{"^(song|mixer|notes|controllers|(pattern|pianoroll|instrument):[0-9a-f]{16})$"};
+	static const QRegularExpression anchorRe{"^((track|head):[0-9a-f]{16}|(chan|fx):[0-9]{1,5})$"};
+	static const QRegularExpression idRe{"^[0-9a-f]{16}$"};
+	constexpr double MaxTicks = 1 << 30;
+	constexpr double MaxPixels = 100000;
+
+	auto number = [](const QJsonValue& v, double min, double max) -> std::optional<double> {
+		if (!v.isDouble()) { return std::nullopt; }
+		const double d = v.toDouble();
+		return d >= min && d <= max ? std::optional{d} : std::nullopt;
+	};
+
+	QJsonObject result;
+	const QJsonValue cursor = message.value("cursor");
+	if (cursor.isObject())
+	{
+		const QJsonObject c = cursor.toObject();
+		if (!windowRe.match(c.value("w").toString()).hasMatch()) { return std::nullopt; }
+		QJsonObject clean{{"w", c.value("w")}};
+		if (c.contains("a"))
+		{
+			if (!anchorRe.match(c.value("a").toString()).hasMatch()) { return std::nullopt; }
+			clean.insert("a", c.value("a"));
+		}
+		const std::array<std::tuple<const char*, double, double>, 4> fields{{
+			{"tick", -MaxTicks, MaxTicks}, {"key", 0, 200}, {"x", -MaxPixels, MaxPixels}, {"y", -MaxPixels, MaxPixels}}};
+		for (const auto& [name, min, max] : fields)
+		{
+			if (!c.contains(name)) { continue; }
+			const auto v = number(c.value(name), min, max);
+			if (!v) { return std::nullopt; }
+			clean.insert(name, *v);
+		}
+		result.insert("cursor", clean);
+	}
+	else if (!cursor.isNull() && !cursor.isUndefined()) { return std::nullopt; }
+	else { result.insert("cursor", QJsonValue::Null); }
+
+	const QJsonValue play = message.value("play");
+	if (play.isObject())
+	{
+		const QJsonObject p = play.toObject();
+		QJsonObject clean{{"playing", p.value("playing").toBool()}};
+		for (const char* name : {"song", "pattern", "tick"})
+		{
+			if (!p.contains(name)) { continue; }
+			const auto tick = number(p.value(name), 0, MaxTicks);
+			if (!tick) { return std::nullopt; }
+			clean.insert(name, *tick);
+		}
+		if (p.contains("mode"))
+		{
+			const QString mode = p.value("mode").toString();
+			if (mode != "song" && mode != "pattern" && mode != "clip") { return std::nullopt; }
+			clean.insert("mode", mode);
+		}
+		for (const char* name : {"ref", "pref"})
+		{
+			if (!p.contains(name)) { continue; }
+			if (!idRe.match(p.value(name).toString()).hasMatch()) { return std::nullopt; }
+			clean.insert(name, p.value(name));
+		}
+		result.insert("play", clean);
+	}
+	else if (!play.isNull() && !play.isUndefined()) { return std::nullopt; }
+	else { result.insert("play", QJsonValue::Null); }
+
+	const QJsonValue view = message.value("view");
+	if (view.isObject())
+	{
+		QJsonObject clean;
+		if (view.toObject().contains("mixsel"))
+		{
+			const auto channel = number(view.toObject().value("mixsel"), 0, 10000);
+			if (!channel) { return std::nullopt; }
+			clean.insert("mixsel", *channel);
+		}
+		result.insert("view", clean);
+	}
+	else if (!view.isNull() && !view.isUndefined()) { return std::nullopt; }
+	else { result.insert("view", QJsonValue::Null); }
+
+	return result;
 }
 
 

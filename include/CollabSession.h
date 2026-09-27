@@ -108,7 +108,11 @@ public:
 	static CollabSession* instance();
 
 	void connectToServer(const QString& host, quint16 port, const QString& user, const QString& project,
-		JoinMode mode);
+		JoinMode mode, const QString& color = {});
+
+	//! Where this user is: {cursor, play, view}, see proto::sanitizePresence; ignored unless connected
+	void sendPresence(const QJsonObject& presence);
+	QString userColor() const { return m_color; }
 	void disconnectFromServer();
 
 	State state() const { return m_state; }
@@ -122,6 +126,10 @@ public:
 signals:
 	void stateChanged();
 	void errorOccurred(const QString& message);
+	//! Another user's presence changed ({clientId, user, color, cursor, play} or {clientId, gone})
+	void presenceReceived(const QJsonObject& presence);
+	//! The session ended: forget everybody's presence
+	void presenceCleared();
 
 public:
 	// JournalHook
@@ -246,6 +254,7 @@ private:
 	State m_state = State::Disconnected;
 	JoinMode m_joinMode = JoinMode::Open;
 	QString m_user;
+	QString m_color;
 	QString m_project;
 	QString m_clientId;
 	qint64 m_seq = 0;

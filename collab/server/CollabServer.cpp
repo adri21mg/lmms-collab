@@ -100,7 +100,14 @@ void CollabServer::onDisconnected(QTcpSocket* socket)
 	const auto it = m_clients.find(socket);
 	if (it == m_clients.end()) { return; }
 	qInfo("[%s] %s disconnected", qPrintable(it->second.clientId), qPrintable(it->second.user));
+	Project* project = it->second.project;
+	const QString clientId = it->second.clientId;
+	const bool hadPresence = !it->second.presence.isEmpty();
 	m_clients.erase(it);
+	if (project && hadPresence)
+	{
+		broadcast(project, {{"t", proto::msg::Presence}, {"clientId", clientId}, {"gone", true}});
+	}
 	socket->deleteLater();
 }
 
@@ -146,6 +153,7 @@ void CollabServer::handleMessage(Client& client, const QJsonObject& message)
 			return;
 		}
 		client.user = message.value("user").toString().left(64);
+		if (const auto color = proto::validColor(message.value("color"))) { client.color = *color; }
 		qInfo("[%s] hello from %s", qPrintable(client.clientId), qPrintable(client.user));
 		send(client, {{"t", proto::msg::Welcome}, {"proto", proto::Version}, {"clientId", client.clientId}});
 	}
@@ -156,6 +164,7 @@ void CollabServer::handleMessage(Client& client, const QJsonObject& message)
 	else if (t == proto::msg::Create) { handleCreate(client, message); }
 	else if (t == proto::msg::Open) { handleOpen(client, message); }
 	else if (t == proto::msg::Tx) { handleTx(client, message); }
+	else if (t == proto::msg::Presence) { handlePresence(client, message); }
 	else { sendError(client, "unknown message type " + t.left(32)); }
 }
 
@@ -182,6 +191,7 @@ void CollabServer::handleCreate(Client& client, const QJsonObject& message)
 	qInfo("[%s] %s created project \"%s\" (%d pattern clips)", qPrintable(client.clientId), qPrintable(client.user),
 		qPrintable(name), p->state.clipCount());
 	send(client, {{"t", proto::msg::Joined}, {"project", name}, {"seq", p->seq}});
+	sendPresenceOfOthers(client);
 }
 
 
@@ -196,6 +206,53 @@ void CollabServer::handleOpen(Client& client, const QJsonObject& message)
 		qPrintable(name), p->seq);
 	send(client, {{"t", proto::msg::Joined}, {"project", name}, {"seq", p->seq},
 		{"mmp", QString::fromUtf8(p->state.toMmp())}});
+	sendPresenceOfOthers(client);
+}
+
+
+void CollabServer::handlePresence(Client& client, const QJsonObject& message)
+{
+	if (!client.project) { return; }
+	const auto presence = proto::sanitizePresence(message);
+	if (!presence) { return; } // presence is best effort: ignore bad ones instead of disconnecting
+
+	client.presence = *presence;
+	client.presence.insert("t", proto::msg::Presence);
+	client.presence.insert("clientId", client.clientId);
+	client.presence.insert("user", client.user);
+	client.presence.insert("color", client.color);
+
+	// At most one forward per interval; a faster one is delayed, never dropped (the last one matters most)
+	constexpr int MinIntervalMs = 20;
+	const qint64 elapsed = client.presenceForwarded.isValid() ? client.presenceForwarded.elapsed() : MinIntervalMs;
+	if (elapsed >= MinIntervalMs)
+	{
+		client.presenceForwarded.start();
+		broadcast(client.project, client.presence, &client);
+		return;
+	}
+	if (client.presencePending) { return; } // the scheduled forward will send the latest one
+	client.presencePending = true;
+	QTcpSocket* socket = client.socket;
+	QTimer::singleShot(static_cast<int>(MinIntervalMs - elapsed), this, [this, socket] {
+		const auto it = m_clients.find(socket);
+		if (it == m_clients.end() || !it->second.project) { return; }
+		it->second.presencePending = false;
+		it->second.presenceForwarded.start();
+		broadcast(it->second.project, it->second.presence, &it->second);
+	});
+}
+
+
+void CollabServer::sendPresenceOfOthers(Client& client)
+{
+	for (auto& [socket, other] : m_clients)
+	{
+		if (&other != &client && other.project == client.project && !other.presence.isEmpty())
+		{
+			send(client, other.presence);
+		}
+	}
 }
 
 
@@ -241,12 +298,12 @@ void CollabServer::sendError(Client& client, const QString& text)
 }
 
 
-void CollabServer::broadcast(Project* project, const QJsonObject& message)
+void CollabServer::broadcast(Project* project, const QJsonObject& message, const Client* except)
 {
 	const QByteArray frame = proto::encodeJsonFrame(message);
 	for (auto& [socket, client] : m_clients)
 	{
-		if (client.project == project) { socket->write(frame); }
+		if (client.project == project && &client != except) { socket->write(frame); }
 	}
 }
 

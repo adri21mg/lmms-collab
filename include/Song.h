@@ -206,6 +206,9 @@ public:
 		return m_playMode;
 	}
 
+	//! The clip playing in PlayMode::MidiClip (Piano Roll playback)
+	const MidiClip* midiClipToPlay() const { return m_midiClipToPlay; }
+
 	const TimePos& getPlayPos(PlayMode pm) const
 	{
 		return getTimeline(pm).pos();

@@ -24,8 +24,10 @@
 
 #include "CollabMenu.h"
 
+#include <QColorDialog>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QMenuBar>
 #include <QFormLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -34,6 +36,7 @@
 #include <QRadioButton>
 #include <QVBoxLayout>
 
+#include "CollabPresence.h"
 #include "CollabSession.h"
 #include "ConfigManager.h"
 #include "MainWindow.h"
@@ -56,6 +59,16 @@ CollabMenu::CollabMenu(MainWindow* mainWindow) :
 	m_connectAction = addAction(tr("Connect..."), this, &CollabMenu::showConnectDialog);
 	m_disconnectAction = addAction(tr("Disconnect"), this, [] { CollabSession::instance()->disconnectFromServer(); });
 	addSeparator();
+
+	// Collaborators' cursors and where they are (shown at the right of the menu bar)
+	auto presence = new CollabPresence(mainWindow);
+	mainWindow->menuBar()->setCornerWidget(new CollabPresenceBar(presence, mainWindow->menuBar()), Qt::TopRightCorner);
+	auto playheads = addAction(tr("Show collaborators' playback position"));
+	playheads->setCheckable(true);
+	playheads->setChecked(presence->showPlayheads());
+	connect(playheads, &QAction::toggled, presence, &CollabPresence::setShowPlayheads);
+	addSeparator();
+
 	m_statusAction = addAction(QString{});
 	m_statusAction->setEnabled(false);
 
@@ -104,9 +117,33 @@ void CollabMenu::showConnectDialog()
 	auto createMode = new QRadioButton{tr("Share my current song as a new shared project")};
 	(config->value(ConfigSection, "mode") == "create" ? createMode : openMode)->setChecked(true);
 
+	// Color of this user's cursor for the others: chosen once, otherwise derived from the name
+	QColor color{config->value(ConfigSection, "color")};
+	bool colorChosen = color.isValid();
+	auto colorButton = new QPushButton;
+	colorButton->setToolTip(tr("Color of your cursor for the other collaborators"));
+	auto showColor = [&] {
+		const QColor c = colorChosen ? color : CollabPresence::defaultColor(user->text());
+		QPixmap swatch{40, 14};
+		swatch.fill(c);
+		colorButton->setIcon(QIcon{swatch});
+		colorButton->setIconSize(swatch.size());
+	};
+	connect(user, &QLineEdit::textChanged, &dialog, [&] { showColor(); });
+	connect(colorButton, &QPushButton::clicked, &dialog, [&] {
+		const QColor picked = QColorDialog::getColor(colorChosen ? color : CollabPresence::defaultColor(user->text()),
+			&dialog, tr("Your color"));
+		if (!picked.isValid()) { return; }
+		color = picked;
+		colorChosen = true;
+		showColor();
+	});
+	showColor();
+
 	auto form = new QFormLayout;
 	form->addRow(tr("Server:"), server);
 	form->addRow(tr("Your name:"), user);
+	form->addRow(tr("Your color:"), colorButton);
 	form->addRow(tr("Project:"), project);
 	auto buttons = new QDialogButtonBox{QDialogButtonBox::Ok | QDialogButtonBox::Cancel};
 	buttons->button(QDialogButtonBox::Ok)->setText(tr("Connect"));
@@ -140,13 +177,15 @@ void CollabMenu::showConnectDialog()
 		config->setValue(ConfigSection, "user", user->text().trimmed());
 		config->setValue(ConfigSection, "project", project->text().trimmed());
 		config->setValue(ConfigSection, "mode", create ? "create" : "open");
+		if (colorChosen) { config->setValue(ConfigSection, "color", color.name()); }
+		const QColor userColor = colorChosen ? color : CollabPresence::defaultColor(user->text());
 
 		// Opening a shared project replaces the current song, so offer to save it first
 		if (!create && !m_mainWindow->mayChangeProject(true)) { return; }
 
 		CollabSession::instance()->connectToServer(address.left(colon), static_cast<quint16>(port),
 			user->text().trimmed(), project->text().trimmed(),
-			create ? CollabSession::JoinMode::Create : CollabSession::JoinMode::Open);
+			create ? CollabSession::JoinMode::Create : CollabSession::JoinMode::Open, userColor.name());
 		return;
 	}
 }
