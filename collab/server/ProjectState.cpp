@@ -344,6 +344,18 @@ bool ProjectState::apply(const QJsonObject& op)
 	if (type.startsWith("pattern.")) { return applyPatternOp(type, op); }
 	if (type == proto::op::NotesSet) { return applyNotesOp(op); }
 	if (type == proto::op::ParamSet) { return applyParamOp(op); }
+	if (type == proto::op::InstrumentSet || type == proto::op::EffectsSet)
+	{
+		// Relayed to the other clients; the sender stores the result with a track.state in the same tx
+		const Id trackId = proto::parseId(op.value("track"));
+		const bool known = m_songTracks.contains(trackId) || m_patternEditorTracks.contains(trackId);
+		QDomDocument fragment;
+		if (!known || !op.value("xml").isString() || !fragment.setContent(op.value("xml").toString())) { return false; }
+		const QString expected = type == proto::op::InstrumentSet ? "instrument" : "fxchain";
+		const int trackType = m_tracks.value(trackId).attribute("type").toInt();
+		return fragment.documentElement().tagName() == expected
+			&& (trackType == InstrumentTrack || (trackType == SampleTrack && expected == "fxchain"));
+	}
 	return false;
 }
 

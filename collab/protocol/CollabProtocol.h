@@ -62,6 +62,10 @@
 //         client, since all build the track from the same XML). The server only relays these...
 //     {op:"track.state", id, xml}                                  ...and stores the track's settings element
 //         (<instrumenttrack> / <sampletrack>) that the client of the latest change sends once knobs rest
+//     {op:"instrument.set", track, xml}                            the track's whole <instrument> (other plugin,
+//         preset, or plugin state that is not made of parameters: samples, ZynAddSubFX, VST...)
+//     {op:"effects.set", track, xml}                               the track's whole <fxchain> (effects added,
+//         removed or moved, or their inner state changed). Both are relayed; the sender adds a track.state
 // Tracks live in the "song" container (Song Editor) or the "patternstore" container (Pattern Editor).
 // Pattern N is the N-th pattern track in song order; its content is the N-th clip of every Pattern Editor
 // track, so reordering pattern tracks (track.order) also reorders those clips.
@@ -110,7 +114,7 @@ inline constexpr auto Error = "error";
  *   cursor: null (not over a shared window) or
  *     {w: window, a?: anchor, tick?, key?, x?, y?}
  *       w: "song" | "pattern:<patternTrackId>" | "pianoroll:<clipId>" | "instrument:<trackId>"
- *          | "mixer" | "notes" | "controllers"
+ *          | "mixer" | "notes" | "controllers" | "effect:<trackId>:<n>" (n-th effect of the track)
  *       a: "track:<trackId>" (tick = time, y = 0..1 within the track row),
  *          "head:<trackId>" (x, y = pixels within the track's header),
  *          "chan:<n>" (x, y = pixels within mixer channel n), "fx:<n>" (pixels within the effects of channel n);
@@ -145,6 +149,8 @@ inline constexpr auto PatternRemove = "pattern.remove";
 inline constexpr auto NotesSet = "notes.set";
 inline constexpr auto ParamSet = "param.set";
 inline constexpr auto TrackState = "track.state";
+inline constexpr auto InstrumentSet = "instrument.set";
+inline constexpr auto EffectsSet = "effects.set";
 } // namespace op
 
 //! Owner of the song-wide parameters in param.set

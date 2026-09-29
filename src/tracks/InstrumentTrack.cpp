@@ -205,6 +205,7 @@ InstrumentTrack::~InstrumentTrack()
 
 	// now we're save deleting the instrument
 	if( m_instrument ) delete m_instrument;
+	m_instrument = nullptr; // the members destroyed after this (effects...) may still look at the track
 }
 
 

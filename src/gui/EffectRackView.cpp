@@ -25,6 +25,8 @@
 
 #include "EffectRackView.h"
 
+#include <algorithm>
+
 #include <QApplication>
 #include <QAction>
 #include <QPushButton>
@@ -35,6 +37,7 @@
 #include "EffectSelectDialog.h"
 #include "EffectView.h"
 #include "GroupBox.h"
+#include "KeepWindowOrder.h"
 
 
 namespace lmms::gui
@@ -90,6 +93,8 @@ EffectRackView::~EffectRackView()
 
 void EffectRackView::clearViews()
 {
+	// Deleting the views' control windows would bring another window (e.g. the mixer) to the front
+	KeepWindowOrder keepWindowOrder;
 	while( m_effectViews.size() )
 	{
 		EffectView * e = m_effectViews[m_effectViews.size() - 1];
@@ -206,10 +211,7 @@ void EffectRackView::update()
 
 	int i = 0, nView = 0;
 
-	const int EffectViewMargin = 3;
-	m_lastY = EffectViewMargin;
-
-	for( QVector<EffectView *>::Iterator it = m_effectViews.begin(); 
+	for( QVector<EffectView *>::Iterator it = m_effectViews.begin();
 					it != m_effectViews.end(); i++ )
 	{
 		if( i < view_map.size() && view_map[i] == false )
@@ -219,11 +221,23 @@ void EffectRackView::update()
 		}
 		else
 		{
-			( *it )->move( EffectViewMargin, m_lastY );
-			m_lastY += ( *it )->height();
 			++nView;
 			++it;
 		}
+	}
+
+	// Show the views in the chain's order (it can also be changed from outside, e.g. by a collaborator)
+	const auto& effects = fxChain()->m_effects;
+	std::stable_sort(m_effectViews.begin(), m_effectViews.end(), [&effects](EffectView* a, EffectView* b) {
+		return std::find(effects.begin(), effects.end(), a->effect()) < std::find(effects.begin(), effects.end(), b->effect());
+	});
+
+	const int EffectViewMargin = 3;
+	m_lastY = EffectViewMargin;
+	for (EffectView* view : m_effectViews)
+	{
+		view->move(EffectViewMargin, m_lastY);
+		m_lastY += view->height();
 	}
 
 	w->setFixedSize(EffectView::DEFAULT_WIDTH + 2 * EffectViewMargin, m_lastY);

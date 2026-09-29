@@ -53,6 +53,7 @@ namespace lmms
 
 class AutomatableModel;
 class Clip;
+class Effect;
 class MidiClip;
 class Note;
 class Track;
@@ -275,6 +276,20 @@ private:
 	void paramsAcknowledged(qint64 ctx, qint64 seq);
 	std::optional<ParamKey> paramKeyOf(const AutomatableModel* model) const;
 	AutomatableModel* findParam(const ParamKey& key);
+	//! Forgets the baselines of a track's parameters with a path prefix (e.g. after its instrument changed)
+	void resetParamBaselines(collab_id_t owner, const QString& prefix);
+	void noteParamActivity(collab_id_t owner, bool local);
+
+	// Instruments and effect chains as a whole (milestone M4b)
+	//! Sends instrument changes (other plugin, preset), effect chain changes (added, removed, moved effects)
+	//! and changes of plugin state that is not made of parameters (samples, ZynAddSubFX, VST...)
+	void flushPlugins();
+	void applyRemoteInstrument(const QJsonObject& op);
+	void applyRemoteEffects(const QJsonObject& op);
+	//! Records the current instrument/effects of a track as synchronized
+	void rebasePlugins(Track* track);
+	//! Tracks whose instrument or effect windows are open (their plugin state may change without knobs)
+	static QSet<collab_id_t> tracksBeingEdited();
 
 	// Undo
 	Gesture* openGestureFor(Kind kind, collab_id_t parent, collab_id_t id, const QString& path = {});
@@ -329,11 +344,34 @@ private:
 	QHash<ParamKey, std::uint64_t> m_openParamGesture;
 	std::unique_ptr<QFile> m_log;
 
+	//! Last synchronized instrument and effect chain of a track
+	struct PluginState
+	{
+		QString instrumentIdentity; //!< which instrument object/plugin (changes when it is replaced)
+		QString instrumentXml;
+		QString effectsIdentity;    //!< which effects, in which order
+		QString effectsXml;
+		bool localParamsTouched = false;  //!< our knob changes since the XML above was taken
+		bool remoteParamsTouched = false; //!< the other side's knob changes since then
+		QElapsedTimer lastParamActivity;
+		bool known = false;         //!< the state above was taken at least once
+	};
+	QHash<collab_id_t, PluginState> m_plugins;
+	QSet<collab_id_t> m_editedTracks;  //!< tracks with open plugin windows at the last check
+	QSet<collab_id_t> m_externalGuiTracks; //!< edited tracks whose plugins have a window of their own
+	QElapsedTimer m_opaqueCheck;
+
 	std::map<std::uint64_t, Gesture> m_gestures;                      //!< by journal token
 	QHash<QPair<int, collab_id_t>, std::uint64_t> m_openGesture;      //!< (kind, id) -> gesture collecting changes
 	std::uint64_t m_nextGesture = 1;
 	bool m_recordGestures = true;
 };
+
+//! The track whose effect chain holds @p effect (nullptr: e.g. a mixer channel's effect)
+LMMS_EXPORT Track* trackOfEffect(const Effect* effect);
+//! Position of @p effect in its track's chain, or -1
+LMMS_EXPORT int effectIndex(const Effect* effect);
+LMMS_EXPORT Effect* effectAt(Track* track, int index);
 
 } // namespace collab
 

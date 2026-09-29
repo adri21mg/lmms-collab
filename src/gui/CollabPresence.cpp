@@ -43,6 +43,9 @@
 #include "CollabSession.h"
 #include "ConfigManager.h"
 #include "ControllerRackView.h"
+#include "Effect.h"
+#include "EffectControlDialog.h"
+#include "EffectControls.h"
 #include "EffectRackView.h"
 #include "Engine.h"
 #include "GuiApplication.h"
@@ -553,6 +556,14 @@ QString CollabPresence::windowKeyOf(QWidget* content)
 		return clip ? key("pianoroll", clip->collabId()) : QString{};
 	}
 	if (auto window = dynamic_cast<InstrumentTrackWindow*>(content)) { return key("instrument", window->model()->collabId()); }
+	if (auto dialog = dynamic_cast<EffectControlDialog*>(content))
+	{
+		auto controls = dynamic_cast<EffectControls*>(dialog->model());
+		const Effect* effect = controls ? controls->effect() : nullptr;
+		const Track* track = effect ? collab::trackOfEffect(effect) : nullptr;
+		if (track) { return QString{"%1:%2"}.arg(key("effect", track->collabId())).arg(collab::effectIndex(effect)); }
+		return {};
+	}
 	if (content == gui->mixerView()) { return "mixer"; }
 	if (content == gui->getProjectNotes()) { return "notes"; }
 	if (content == gui->getControllerRackView()) { return "controllers"; }
@@ -886,6 +897,12 @@ QString CollabPresence::describeWindow(const QString& window)
 		const Track* t = trackById(id);
 		return t ? tr("Instrument: %1").arg(t->name()) : tr("Instrument");
 	}
+	if (window.startsWith("effect:"))
+	{
+		Track* t = trackById(collab::idFromString(window.section(':', 1, 1)));
+		const Effect* e = collab::effectAt(t, window.section(':', 2).toInt());
+		return e ? tr("Effect: %1 (%2)").arg(e->displayName(), t->name()) : tr("Effect");
+	}
 	return {};
 }
 
@@ -917,6 +934,26 @@ void CollabPresence::goTo(const QString& clientId)
 			gui->pianoRoll()->setCurrentMidiClip(clip);
 			bringToFront(m_mainWindow, gui->pianoRoll());
 		}
+	}
+	else if (window.startsWith("effect:"))
+	{
+		// The effect's window if it was opened before; otherwise its track's instrument window
+		const Effect* effect = collab::effectAt(trackById(collab::idFromString(window.section(':', 1, 1))),
+			window.section(':', 2).toInt());
+		for (QMdiSubWindow* subWindow : m_mainWindow->workspace()->subWindowList())
+		{
+			auto dialog = dynamic_cast<EffectControlDialog*>(subWindow->widget());
+			auto controls = dialog ? dynamic_cast<EffectControls*>(dialog->model()) : nullptr;
+			if (effect && controls && controls->effect() == effect)
+			{
+				bringToFront(m_mainWindow, dialog);
+				return;
+			}
+		}
+		const QString trackWindow = "instrument:" + window.section(':', 1, 1);
+		it->second.lastWindow = trackWindow;
+		it->second.cursor = QJsonObject{};
+		goTo(clientId);
 	}
 	else if (window.startsWith("instrument:"))
 	{

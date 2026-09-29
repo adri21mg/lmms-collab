@@ -48,6 +48,9 @@ EffectChain::EffectChain( Model * _parent ) :
 
 EffectChain::~EffectChain()
 {
+	// Switching the chain off while it is destroyed is no undoable change (and its track may already be half
+	// destroyed: undo checkpoints serialize it)
+	m_enabledModel.setJournalling(false);
 	clear();
 }
 
@@ -61,7 +64,9 @@ void EffectChain::saveSettings( QDomDocument & _doc, QDomElement & _this )
 
 	for( Effect* effect : m_effects)
 	{
-		if (auto dummy = dynamic_cast<DummyEffect*>(effect)) { _this.appendChild(dummy->originalPluginData()); }
+		// A copy: appending the node itself moves it into _doc, and it is left pointing into that document
+		// after it is gone (a crash at the next save)
+		if (auto dummy = dynamic_cast<DummyEffect*>(effect)) { _this.appendChild(_doc.importNode(dummy->originalPluginData(), true)); }
 		else
 		{
 			QDomElement ef = effect->saveState( _doc, _this );

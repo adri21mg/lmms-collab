@@ -184,6 +184,7 @@ CollabSession::CollabSession() :
 	connect(m_txQueueTimer, &QTimer::timeout, this, &CollabSession::processTxQueue);
 	connect(m_structureTimer, &QTimer::timeout, this, [this] {
 		flushStructure();
+		flushPlugins();
 		flushParams();
 	});
 	connect(m_trackStateTimer, &QTimer::timeout, this, &CollabSession::sendTrackStates);
@@ -207,6 +208,9 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 	m_color = color;
 	const QString logDir = ConfigManager::inst()->workingDir() + "collab/";
 	QDir{}.mkpath(logDir);
+	// The previous session's log is kept: it matters most after a crash, and LMMS is then started again
+	QFile::remove(logDir + "session.previous.log");
+	QFile::rename(logDir + "session.log", logDir + "session.previous.log");
 	m_log = std::make_unique<QFile>(logDir + "session.log");
 	if (!m_log->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) { m_log.reset(); }
 	log(QString{"connect %1:%2 as %3, project %4"}.arg(host).arg(port).arg(user, project));
@@ -243,6 +247,9 @@ void CollabSession::disconnectFromServer()
 	m_trackParams.clear();
 	m_ctxParamTracks.clear();
 	m_openParamGesture.clear();
+	m_plugins.clear();
+	m_editedTracks.clear();
+	m_opaqueCheck.invalidate();
 	m_txQueue.clear();
 	m_txQueueTimer->stop();
 	m_decoder = proto::FrameDecoder{};
@@ -444,6 +451,7 @@ void CollabSession::flushAll()
 {
 	if (m_state != State::Live) { return; }
 	flushStructure();
+	flushPlugins();
 	flushParams();
 	std::vector<MidiClip*> clips;
 	for (const auto& [clip, tracker] : m_trackers) { clips.push_back(clip); }
@@ -529,6 +537,13 @@ void CollabSession::applyTx(const QJsonObject& message)
 			continue;
 		}
 		if (type == proto::op::TrackState) { continue; } // for the server's copy; we have every change already
+		if (type == proto::op::InstrumentSet || type == proto::op::EffectsSet)
+		{
+			flushNoteGroup();
+			if (type == proto::op::InstrumentSet) { applyRemoteInstrument(op); }
+			else { applyRemoteEffects(op); }
+			continue;
+		}
 		if (type.startsWith("note."))
 		{
 			const collab_id_t clipId = proto::parseId(op.value("clip"));

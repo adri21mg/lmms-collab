@@ -32,10 +32,13 @@
 // The server cannot map these paths to its XML, so once a track's knobs come to rest, the client that
 // made the latest change (by server order, so exactly one) sends the track's settings for it to store.
 
+#include <cmath>
 #include <functional>
 
 #include <QDomDocument>
 #include <QFile>
+#include <QMdiArea>
+#include <QMdiSubWindow>
 #include <QTextStream>
 
 #include "AutomationClip.h"
@@ -46,10 +49,20 @@
 #include "Engine.h"
 #include "Instrument.h"
 #include "InstrumentTrack.h"
+#include "DummyEffect.h"
+#include "Effect.h"
+#include "EffectControlDialog.h"
+#include "EffectControls.h"
+#include "EffectRackView.h"
+#include "GuiApplication.h"
+#include "InstrumentTrackWindow.h"
+#include "KeepWindowOrder.h"
+#include "MainWindow.h"
 #include "MeterModel.h"
 #include "Microtuner.h"
 #include "MidiPort.h"
 #include "PatternStore.h"
+#include "PluginFactory.h"
 #include "SampleTrack.h"
 #include "Song.h"
 
@@ -95,6 +108,132 @@ QString fingerprint(const AutomatableModel* model)
 {
 	return QString{"%1/%2/%3"}.arg(model->metaObject()->className())
 		.arg(model->minValue<float>()).arg(model->maxValue<float>());
+}
+
+QString elementText(const QDomElement& element)
+{
+	QString text;
+	QTextStream stream{&text};
+	element.save(stream, 0);
+	return text;
+}
+
+EffectChain* effectsOf(Track* track)
+{
+	if (auto instrumentTrack = dynamic_cast<InstrumentTrack*>(track)) { return instrumentTrack->audioBusHandle()->effects(); }
+	if (auto sampleTrack = dynamic_cast<SampleTrack*>(track)) { return sampleTrack->audioBusHandle()->effects(); }
+	return nullptr;
+}
+
+//! The track's <instrument> element as LMMS saves it (plugin name, its whole state, sub-plugin key)
+QString instrumentXml(InstrumentTrack* track)
+{
+	Instrument* instrument = track->instrument();
+	if (!instrument) { return {}; }
+	QDomDocument doc;
+	QDomElement element = doc.createElement("instrument");
+	doc.appendChild(element);
+	element.setAttribute("name", instrument->descriptor()->name);
+	QDomElement state = instrument->saveState(doc, element);
+	if (instrument->key().isValid()) { state.appendChild(instrument->key().saveXML(doc)); }
+	return elementText(element);
+}
+
+constexpr auto EffectIdProperty = "collabEffectId";
+
+//! Identifies an effect on every client (sent as a "cid" attribute), so that a remote change only touches
+//! the effects that changed and keeps the others, their windows and their knobs as they are
+QString effectId(Effect* effect)
+{
+	QString id = effect->property(EffectIdProperty).toString();
+	if (id.isEmpty())
+	{
+		id = idToString(newId());
+		effect->setProperty(EffectIdProperty, id);
+	}
+	return id;
+}
+
+QList<QDomElement> effectElements(const QDomElement& chain)
+{
+	QList<QDomElement> elements;
+	const int count = chain.attribute("numofeffects").toInt();
+	for (QDomElement e = chain.firstChildElement("effect"); !e.isNull() && elements.size() < count;
+		e = e.nextSiblingElement("effect"))
+	{
+		elements.append(e);
+	}
+	return elements;
+}
+
+QString effectsXml(EffectChain* chain)
+{
+	QDomDocument doc;
+	QDomElement parent = doc.createElement("collab");
+	doc.appendChild(parent);
+	chain->saveState(doc, parent);
+	const QList<QDomElement> elements = effectElements(parent.firstChildElement());
+	for (int i = 0; i < elements.size() && i < static_cast<int>(chain->effects().size()); ++i)
+	{
+		QDomElement element = elements[i];
+		element.setAttribute("cid", effectId(chain->effects()[i]));
+	}
+	return elementText(parent.firstChildElement());
+}
+
+//! A number unique to this object for the whole run. Addresses are not enough: a new instrument can be
+//! allocated exactly where the deleted one was.
+QString serialOf(QObject* object)
+{
+	static qulonglong s_next = 1;
+	if (!object) { return "0"; }
+	QVariant serial = object->property("collabSerial");
+	if (!serial.isValid())
+	{
+		serial = s_next++;
+		object->setProperty("collabSerial", serial);
+	}
+	return serial.toString();
+}
+
+//! Changes whenever the instrument object is replaced (another plugin, a preset)
+QString instrumentIdentity(InstrumentTrack* track)
+{
+	return serialOf(track->instrument());
+}
+
+//! Changes whenever effects are added, removed or moved
+QString effectsIdentity(EffectChain* chain)
+{
+	QStringList ids;
+	for (Effect* effect : chain->effects()) { ids.append(serialOf(effect)); }
+	return ids.join(',');
+}
+
+//! Plugins with a window of their own besides the one LMMS shows (it is not an LMMS subwindow)
+bool hasExternalGui(Track* track)
+{
+	static const QStringList external{"zynaddsubfx", "vestige", "vsteffect", "carlarack", "carlapatchbay"};
+	if (auto instrumentTrack = dynamic_cast<InstrumentTrack*>(track);
+		instrumentTrack && instrumentTrack->instrument()
+		&& external.contains(QString::fromUtf8(instrumentTrack->instrument()->descriptor()->name)))
+	{
+		return true;
+	}
+	if (EffectChain* chain = effectsOf(track))
+	{
+		for (Effect* effect : chain->effects())
+		{
+			if (external.contains(QString::fromUtf8(effect->descriptor()->name))) { return true; }
+		}
+	}
+	return false;
+}
+
+QString keyText(const QDomElement& instrument)
+{
+	const QDomElement key = instrument.elementsByTagName("key").item(0).toElement();
+	return key.isNull() ? QString{} : elementText(key);
 }
 
 QString settingsXml(Track* track)
@@ -172,7 +311,8 @@ std::vector<std::pair<QString, AutomatableModel*>> CollabSession::enumerateParam
 	{
 		n = 0;
 		params.emplace_back(QString{"fx:%1"}.arg(n++), effects->enabledModel());
-		visit(effects, "fx");
+		// In chain order: moving an effect reorders the chain, not the objects (children keep creation order)
+		for (Effect* effect : effects->effects()) { visit(effect, "fx"); }
 	}
 	return params;
 }
@@ -283,9 +423,11 @@ void CollabSession::flushParams()
 				m_paramBaseline.insert(key, value); // first time seen: that is the synchronized value
 				continue;
 			}
-			if (*base == value) { continue; }
+			if (*base == value || (std::isnan(*base) && std::isnan(value))) { continue; }
 			const float previous = *base;
 			*base = value;
+			// e.g. AudioFileProcessor's start/end knobs without a sample: nothing meaningful to send
+			if (!std::isfinite(value)) { continue; }
 
 			if (!automated) { automated = automatedModels(); }
 			if (automated->contains(model.data()) || model->controllerConnection())
@@ -298,7 +440,11 @@ void CollabSession::flushParams()
 				{"owner", owner == 0 ? QString{proto::SongOwner} : proto::idString(owner)}, {"path", path}, {"v", value},
 				{"k", fingerprint(model)}});
 			m_pendingParams[key] = ctx;
-			if (owner != 0) { m_ctxParamTracks[ctx].insert(owner); }
+			if (owner != 0)
+			{
+				m_ctxParamTracks[ctx].insert(owner);
+				noteParamActivity(owner, true);
+			}
 			record(Kind::Param, owner, 0, QJsonObject{{"v", previous}}, QJsonObject{{"v", value}}, path);
 		}
 	}
@@ -361,6 +507,7 @@ void CollabSession::applyRemoteParam(const QJsonObject& op, qint64 seq)
 	else { log(QString{"remote %1 %2 skipped: our own change is pending"}.arg(op.value("owner").toString(), key.second)); }
 	if (key.first != 0)
 	{
+		noteParamActivity(key.first, false);
 		TrackParamState& state = m_trackParams[key.first];
 		if (seq >= state.lastSeq)
 		{
@@ -390,6 +537,378 @@ void CollabSession::sendTrackStates()
 		}
 	}
 	if (!ops.isEmpty()) { sendOps(ops); }
+}
+
+
+void CollabSession::resetParamBaselines(collab_id_t owner, const QString& prefix)
+{
+	for (auto it = m_paramBaseline.begin(); it != m_paramBaseline.end();)
+	{
+		it = it.key().first == owner && it.key().second.startsWith(prefix) ? m_paramBaseline.erase(it) : std::next(it);
+	}
+	for (auto it = m_pendingParams.begin(); it != m_pendingParams.end();)
+	{
+		it = it.key().first == owner && it.key().second.startsWith(prefix) ? m_pendingParams.erase(it) : std::next(it);
+	}
+	m_paramIndexAge.invalidate(); // renumber at the next flush
+}
+
+
+void CollabSession::noteParamActivity(collab_id_t owner, bool local)
+{
+	PluginState& state = m_plugins[owner];
+	(local ? state.localParamsTouched : state.remoteParamsTouched) = true;
+	state.lastParamActivity.start();
+}
+
+
+// ------------------------------------------------------------------------------------------------
+// Instruments and effect chains (milestone M4b)
+
+void CollabSession::rebasePlugins(Track* track)
+{
+	PluginState& state = m_plugins[track->collabId()];
+	if (auto instrumentTrack = dynamic_cast<InstrumentTrack*>(track))
+	{
+		state.instrumentIdentity = instrumentIdentity(instrumentTrack);
+		state.instrumentXml = instrumentXml(instrumentTrack);
+	}
+	if (EffectChain* chain = effectsOf(track))
+	{
+		state.effectsIdentity = effectsIdentity(chain);
+		state.effectsXml = effectsXml(chain);
+	}
+	state.localParamsTouched = state.remoteParamsTouched = false;
+	state.known = true;
+}
+
+
+QSet<collab_id_t> CollabSession::tracksBeingEdited()
+{
+	QSet<collab_id_t> tracks;
+	auto gui = gui::getGUI();
+	if (!gui || !gui->mainWindow()) { return tracks; }
+	for (QMdiSubWindow* subWindow : gui->mainWindow()->workspace()->subWindowList())
+	{
+		if (!subWindow->isVisible()) { continue; }
+		QWidget* content = subWindow->widget();
+		if (auto window = dynamic_cast<gui::InstrumentTrackWindow*>(content)) { tracks.insert(window->model()->collabId()); }
+		else if (auto dialog = dynamic_cast<gui::EffectControlDialog*>(content))
+		{
+			auto controls = dynamic_cast<EffectControls*>(dialog->model());
+			if (Track* track = controls ? trackOfEffect(controls->effect()) : nullptr) { tracks.insert(track->collabId()); }
+		}
+	}
+	return tracks;
+}
+
+
+void CollabSession::flushPlugins()
+{
+	if (m_state != State::Live) { return; }
+
+	// Plugin state that is not made of parameters (a loaded sample, ZynAddSubFX, a VST...) can only be seen by
+	// serializing the plugin, so that is done every 2 s for plugins whose windows are open, and once more
+	// when their window closes. Replacing an instrument or changing the effects is seen immediately.
+	QSet<collab_id_t> checkState;
+	if (!m_opaqueCheck.isValid() || m_opaqueCheck.elapsed() >= 2000)
+	{
+		m_opaqueCheck.start();
+		const QSet<collab_id_t> edited = tracksBeingEdited();
+		checkState = edited | (m_editedTracks - edited);
+		m_editedTracks = edited;
+		// ZynAddSubFX, VSTs... have their own window, opened from the track's window, which can stay open when
+		// that one closes: once edited, they are checked for the rest of the session
+		for (const collab_id_t id : edited)
+		{
+			if (Track* track = findTrack(id); track && hasExternalGui(track)) { m_externalGuiTracks.insert(id); }
+		}
+		checkState |= m_externalGuiTracks;
+	}
+
+	QJsonArray ops;
+	QSet<Track*> changedTracks;
+	for (const TrackContainer* container : {static_cast<TrackContainer*>(Engine::getSong()),
+		static_cast<TrackContainer*>(Engine::patternStore())})
+	{
+		for (Track* track : container->tracks())
+		{
+			const collab_id_t id = track->collabId();
+			auto instrumentTrack = dynamic_cast<InstrumentTrack*>(track);
+			EffectChain* chain = effectsOf(track);
+			if (!m_structure.tracks.contains(id) || (!instrumentTrack && !chain)) { continue; }
+			PluginState& state = m_plugins[id];
+			if (!state.known)
+			{
+				rebasePlugins(track); // first time seen: that is the synchronized state
+				continue;
+			}
+			// While knobs move, the XML differs because of them; they are synchronized on their own
+			const bool quiet = !state.lastParamActivity.isValid() || state.lastParamActivity.elapsed() >= 1000;
+			const bool compareState = checkState.contains(id) && quiet;
+			// The other side's knob changes also change the XML, but they are already synchronized. Our own
+			// knob changes are too, yet they may hide a change of state (a sample loaded, a preset...): the
+			// whole state is then sent, and the other side only reloads what really differs.
+			const bool onlyRemoteKnobs = state.remoteParamsTouched && !state.localParamsTouched;
+
+			if (instrumentTrack)
+			{
+				const QString identity = instrumentIdentity(instrumentTrack);
+				QString xml;
+				bool send = identity != state.instrumentIdentity;
+				if (!send && compareState)
+				{
+					xml = instrumentXml(instrumentTrack);
+					send = xml != state.instrumentXml && !onlyRemoteKnobs;
+					if (!send) { state.instrumentXml = xml; }
+				}
+				if (send)
+				{
+					if (xml.isEmpty()) { xml = instrumentXml(instrumentTrack); }
+					ops.append(QJsonObject{{"op", proto::op::InstrumentSet}, {"track", proto::idString(id)}, {"xml", xml}});
+					state.instrumentIdentity = identity;
+					state.instrumentXml = xml;
+					resetParamBaselines(id, "i:");
+					changedTracks.insert(track);
+				}
+			}
+			if (chain)
+			{
+				const QString identity = effectsIdentity(chain);
+				QString xml;
+				bool send = identity != state.effectsIdentity;
+				if (!send && compareState)
+				{
+					xml = effectsXml(chain);
+					send = xml != state.effectsXml && !onlyRemoteKnobs;
+					if (!send) { state.effectsXml = xml; }
+				}
+				if (send)
+				{
+					if (xml.isEmpty()) { xml = effectsXml(chain); }
+					ops.append(QJsonObject{{"op", proto::op::EffectsSet}, {"track", proto::idString(id)}, {"xml", xml}});
+					state.effectsIdentity = identity;
+					state.effectsXml = xml;
+					resetParamBaselines(id, "fx:");
+					changedTracks.insert(track);
+					for (Effect* effect : chain->effects()) { effect->setProperty("collabEffectIdShared", true); }
+				}
+			}
+			if (compareState) { state.localParamsTouched = state.remoteParamsTouched = false; }
+		}
+	}
+	// The server stores the result as the track's settings
+	for (Track* track : changedTracks)
+	{
+		ops.append(QJsonObject{{"op", proto::op::TrackState}, {"id", proto::idString(track->collabId())},
+			{"xml", settingsXml(track)}});
+	}
+	if (!ops.isEmpty()) { sendOps(ops); }
+}
+
+
+void CollabSession::applyRemoteInstrument(const QJsonObject& op)
+{
+	auto track = dynamic_cast<InstrumentTrack*>(findTrack(proto::parseId(op.value("track"))));
+	QDomDocument doc;
+	if (!track || !doc.setContent(op.value("xml").toString()) || doc.documentElement().tagName() != "instrument") { return; }
+	const QDomElement element = doc.documentElement();
+	const QString name = element.attribute("name");
+
+	const QString currentXml = instrumentXml(track);
+	QDomDocument current;
+	current.setContent(currentXml);
+	const bool samePlugin = track->instrument() && track->instrument()->descriptor()->name == name
+		&& keyText(current.documentElement()) == keyText(element);
+	if (samePlugin && currentXml == op.value("xml").toString())
+	{
+		// Typically sent after knob changes that already arrived one by one: nothing to reload
+		log(QString{"remote instrument %1 for %2: already the same"}.arg(name, proto::idString(track->collabId())));
+		rebasePlugins(track);
+		return;
+	}
+
+	gui::KeepWindowOrder keepWindowOrder;
+	m_applyingRemote = true;
+	if (!samePlugin)
+	{
+		// Like loading a project: another plugin (or sub-plugin, e.g. another VST) for this track
+		using PluginKey = Plugin::Descriptor::SubPluginFeatures::Key;
+		PluginKey key(element.elementsByTagName("key").item(0).toElement());
+		// loadInstrument() renames the track after the plugin: the name is synchronized on its own (a preset
+		// dropped on a track renames it)
+		const QString trackName = track->name();
+		track->loadInstrument(name, &key);
+		track->setName(trackName);
+	}
+	if (track->instrument()) { track->instrument()->restoreState(element.firstChildElement()); }
+	m_applyingRemote = false;
+
+	log(QString{"remote instrument %1 for %2 (%3)"}.arg(name, proto::idString(track->collabId()),
+		samePlugin ? "state" : "new plugin"));
+	resetParamBaselines(track->collabId(), "i:");
+	rebasePlugins(track);
+}
+
+
+void CollabSession::applyRemoteEffects(const QJsonObject& op)
+{
+	Track* track = findTrack(proto::parseId(op.value("track")));
+	EffectChain* chain = track ? effectsOf(track) : nullptr;
+	QDomDocument doc;
+	if (!chain || !doc.setContent(op.value("xml").toString()) || doc.documentElement().tagName() != "fxchain") { return; }
+
+	const QDomElement incoming = doc.documentElement();
+
+	// Effect by effect instead of reloading the chain: effects that did not change keep their objects, so
+	// their views, open windows and knobs stay as they are
+	QDomDocument currentDoc;
+	currentDoc.setContent(effectsXml(chain));
+	const QList<QDomElement> currentElements = effectElements(currentDoc.documentElement());
+	const std::vector<Effect*> old = chain->effects();
+	auto stateText = [](QDomElement element) {
+		element.removeAttribute("cid");
+		return elementText(element);
+	};
+
+	gui::KeepWindowOrder keepWindowOrder;
+	std::vector<Effect*> result;
+	int created = 0, restored = 0;
+	m_applyingRemote = true;
+	{
+		auto guard = Engine::audioEngine()->requestChangesGuard();
+		for (const QDomElement& element : effectElements(incoming))
+		{
+			const QString id = element.attribute("cid");
+			auto available = [&](std::size_t i) { return std::find(result.begin(), result.end(), old[i]) == result.end(); };
+			int match = -1;
+			for (std::size_t i = 0; i < old.size() && match < 0; ++i)
+			{
+				if (available(i) && !id.isEmpty() && old[i]->property(EffectIdProperty).toString() == id) { match = i; }
+			}
+			// Effects loaded from the project have no id until one side sends them: same plugin, in order
+			for (std::size_t i = 0; i < old.size() && match < 0 && i < static_cast<std::size_t>(currentElements.size()); ++i)
+			{
+				if (available(i) && !old[i]->property("collabEffectIdShared").toBool()
+					&& currentElements[i].attribute("name") == element.attribute("name")
+					&& keyText(currentElements[i]) == keyText(element))
+				{
+					match = i;
+				}
+			}
+
+			Effect* effect = nullptr;
+			if (match >= 0)
+			{
+				effect = old[match];
+				if (stateText(currentElements[match]) != stateText(element))
+				{
+					effect->restoreState(element);
+					++restored;
+				}
+			}
+			else
+			{
+				// As EffectChain::loadSettings() does, but a plugin missing here is kept as a placeholder
+				// without LMMS's "Plugin not found" message box on every change
+				EffectKey key(element.elementsByTagName("key").item(0).toElement());
+				const bool available = !getPluginFactory()->pluginInfo(element.attribute("name").toUtf8()).isNull();
+				if (!available) { log(QString{"effect %1 is not available here"}.arg(element.attribute("name"))); }
+				effect = available ? Effect::instantiate(element.attribute("name"), chain, &key) : nullptr;
+				if (effect && effect->isOkay() && effect->nodeName() == element.nodeName()) { effect->restoreState(element); }
+				else
+				{
+					delete effect;
+					effect = new DummyEffect(chain->parentModel(), element);
+				}
+				++created;
+			}
+			effect->setProperty(EffectIdProperty, id);
+			effect->setProperty("collabEffectIdShared", true);
+			result.push_back(effect);
+		}
+
+		for (Effect* effect : old)
+		{
+			if (std::find(result.begin(), result.end(), effect) == result.end()) { chain->removeEffect(effect); }
+		}
+		for (Effect* effect : result)
+		{
+			if (std::find(chain->effects().begin(), chain->effects().end(), effect) == chain->effects().end())
+			{
+				chain->appendEffect(effect);
+			}
+		}
+		for (std::size_t target = 0; target < result.size(); ++target)
+		{
+			while (std::find(chain->effects().begin(), chain->effects().end(), result[target]) - chain->effects().begin()
+				> static_cast<std::ptrdiff_t>(target))
+			{
+				chain->moveUp(result[target]);
+			}
+		}
+		chain->enabledModel()->loadSettings(incoming, "enabled");
+	}
+	m_applyingRemote = false;
+
+	// Effect racks showing this chain drop the views of removed effects, create the new ones and follow the
+	// chain's order (EffectRackView::update() is a private slot)
+	if (auto gui = gui::getGUI(); gui && gui->mainWindow())
+	{
+		for (gui::EffectRackView* rack : gui->mainWindow()->findChildren<gui::EffectRackView*>())
+		{
+			if (rack->model() == chain) { QMetaObject::invokeMethod(rack, "update"); }
+		}
+	}
+	// Only now, so that no new effect can reuse the address of a removed one while views still point to it
+	int removed = 0;
+	for (Effect* effect : old)
+	{
+		if (std::find(result.begin(), result.end(), effect) == result.end())
+		{
+			effect->deleteLater();
+			++removed;
+		}
+	}
+	log(QString{"remote effects for %1: %2 effect(s), %3 new, %4 updated, %5 removed"}
+		.arg(proto::idString(track->collabId())).arg(chain->effects().size()).arg(created).arg(restored).arg(removed));
+	resetParamBaselines(track->collabId(), "fx:");
+	rebasePlugins(track);
+}
+
+
+Track* trackOfEffect(const Effect* effect)
+{
+	for (const TrackContainer* container : {static_cast<TrackContainer*>(Engine::getSong()),
+		static_cast<TrackContainer*>(Engine::patternStore())})
+	{
+		for (Track* track : container->tracks())
+		{
+			const EffectChain* chain = effectsOf(track);
+			if (chain && std::find(chain->effects().begin(), chain->effects().end(), effect) != chain->effects().end())
+			{
+				return track;
+			}
+		}
+	}
+	return nullptr;
+}
+
+
+int effectIndex(const Effect* effect)
+{
+	Track* track = trackOfEffect(effect);
+	const EffectChain* chain = track ? effectsOf(track) : nullptr;
+	if (!chain) { return -1; }
+	return static_cast<int>(std::find(chain->effects().begin(), chain->effects().end(), effect) - chain->effects().begin());
+}
+
+
+Effect* effectAt(Track* track, int index)
+{
+	const EffectChain* chain = track ? effectsOf(track) : nullptr;
+	if (!chain || index < 0 || index >= static_cast<int>(chain->effects().size())) { return nullptr; }
+	return chain->effects()[index];
 }
 
 } // namespace lmms::collab

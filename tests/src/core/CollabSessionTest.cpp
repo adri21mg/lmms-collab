@@ -33,9 +33,15 @@
 
 #include "AutomationClip.h"
 #include "AutomationTrack.h"
+#include "AudioBusHandle.h"
 #include "CollabProtocol.h"
 #include "CollabSession.h"
+#include "ConfigManager.h"
+#include "DummyEffect.h"
+#include "Effect.h"
+#include "EffectChain.h"
 #include "Engine.h"
+#include "Instrument.h"
 #include "InstrumentTrack.h"
 #include "MidiClip.h"
 #include "Note.h"
@@ -168,8 +174,12 @@ private:
 private slots:
 	void initTestCase()
 	{
+		// No plugins are loaded here (they link against lmms.exe): instruments and effects are LMMS' dummies,
+		// which is enough to test how they are synchronized; real plugins are tested in the application
 		Engine::init(true);
 		QVERIFY(m_dataDir.isValid());
+		// Never write into the user's real LMMS workspace (the session log lives in <workspace>/collab)
+		ConfigManager::inst()->setWorkingDir(m_dataDir.filePath("workspace"));
 		m_port = static_cast<quint16>(43000 + QRandomGenerator::global()->bounded(1000));
 		m_server.setProcessChannelMode(QProcess::ForwardedChannels);
 		m_server.start(COLLAB_SERVER_EXE, {"--port", QString::number(m_port), "--data", m_dataDir.path()});
@@ -709,7 +719,7 @@ private slots:
 			const QString left = a.value(i), right = b.value(i);
 			if (left != right) { qWarning("param %lld: [%s] vs [%s]", static_cast<long long>(i), qPrintable(left), qPrintable(right)); }
 		}
-		QVERIFY2(a.size() > 50, "the instrument's parameters are included");
+		QVERIFY2(a.size() > 50, "the track's parameters are included");
 		QCOMPARE(a, b);
 		delete rebuilt;
 		delete original;
@@ -797,6 +807,91 @@ private slots:
 		journal->undo();
 		QCOMPARE(track->volumeModel()->value(), 90.0f);
 		QCOMPARE(m_peer.nextForeignOp("param.set").value("v").toDouble(), 90.0);
+	}
+
+	// ---- M4b: instruments and effects ----
+
+	void testInstrumentsAndEffects()
+	{
+		m_peer.drain();
+		auto track = dynamic_cast<InstrumentTrack*>(m_clip->getTrack());
+		const QString id = proto::idString(track->collabId());
+		// Another instrument here (no plugins in this test: LMMS falls back to its dummy instrument, which is
+		// still a new instrument object): the peer gets the whole instrument, the server the track's settings
+		track->loadInstrument("kicker");
+		const auto instrumentOp = m_peer.nextForeignOp("instrument.set");
+		QCOMPARE(instrumentOp.value("track").toString(), id);
+		QVERIFY(instrumentOp.value("xml").toString().startsWith("<instrument"));
+		QVERIFY(!m_peer.nextForeignOp("track.state").isEmpty());
+
+		// The peer sends the same plugin with new state: applied to the existing instrument, not echoed
+		m_peer.drain();
+		const Instrument* before = track->instrument();
+		m_peer.sendOps({QJsonObject{{"op", "instrument.set"}, {"track", id},
+			{"xml", R"(<instrument name="dummy"><dummyinstrument/></instrument>)"}}});
+		settle(300);
+		QCOMPARE(track->instrument(), before);
+		QVERIFY2(m_peer.nextForeignOp("instrument.set", 500).isEmpty(), "no echo of a remote instrument state");
+
+		// ...and another plugin: the instrument is replaced, still without echo
+		m_peer.sendOps({QJsonObject{{"op", "instrument.set"}, {"track", id},
+			{"xml", R"(<instrument name="tripleoscillator"><tripleoscillator/></instrument>)"}}});
+		QTRY_VERIFY(track->instrument() != before);
+		QVERIFY2(m_peer.nextForeignOp("instrument.set", 500).isEmpty(), "no echo of a remote instrument");
+
+		// Effects added here reach the peer
+		EffectChain* chain = track->audioBusHandle()->effects();
+		chain->appendEffect(new DummyEffect(chain, QDomElement{}));
+		const auto effectsOp = m_peer.nextForeignOp("effects.set");
+		QVERIFY(effectsOp.value("xml").toString().startsWith("<fxchain"));
+		QCOMPARE(effectsOp.value("track").toString(), id);
+
+		// ...and the peer removing all effects removes them here, without echo
+		m_peer.drain();
+		m_peer.sendOps({QJsonObject{{"op", "effects.set"}, {"track", id},
+			{"xml", R"(<fxchain enabled="1" numofeffects="0"/>)"}}});
+		QTRY_COMPARE(chain->effects().size(), std::size_t{0});
+		QVERIFY2(m_peer.nextForeignOp("effects.set", 500).isEmpty(), "no echo of remote effects");
+
+		// Remote effects are applied one by one: a reorder or a removal keeps the other effect objects (and
+		// so their views and open windows)
+		auto effectXml = [](const QString& cid, const QString& name) {
+			return QString{R"(<effect cid="%1" name="%2" wet="1" on="1"><key/></effect>)"}.arg(cid, name);
+		};
+		auto chainXml = [](const QStringList& effects) {
+			return QString{R"(<fxchain enabled="1" numofeffects="%1">%2</fxchain>)"}.arg(effects.size()).arg(effects.join(""));
+		};
+		const QString a = effectXml("00000000000000a1", "ghostA"), b = effectXml("00000000000000b1", "ghostB");
+		m_peer.sendOps({QJsonObject{{"op", "effects.set"}, {"track", id}, {"xml", chainXml({a, b})}}});
+		QTRY_COMPARE(chain->effects().size(), std::size_t{2});
+		Effect* first = chain->effects()[0];
+		Effect* second = chain->effects()[1];
+		m_peer.sendOps({QJsonObject{{"op", "effects.set"}, {"track", id}, {"xml", chainXml({b, a})}}});
+		QTRY_COMPARE(chain->effects()[0], second);
+		QCOMPARE(chain->effects()[1], first);
+		m_peer.sendOps({QJsonObject{{"op", "effects.set"}, {"track", id}, {"xml", chainXml({b})}}});
+		QTRY_COMPARE(chain->effects().size(), std::size_t{1});
+		QCOMPARE(chain->effects()[0], second);
+		QVERIFY2(m_peer.nextForeignOp("effects.set", 500).isEmpty(), "no echo of remote effects");
+
+		// Moving an effect here sends the new order with the same ids
+		m_peer.sendOps({QJsonObject{{"op", "effects.set"}, {"track", id}, {"xml", chainXml({a, b})}}});
+		QTRY_COMPARE(chain->effects().size(), std::size_t{2});
+		m_peer.drain();
+		chain->moveUp(chain->effects()[1]);
+		const QString moved = m_peer.nextForeignOp("effects.set").value("xml").toString();
+		QVERIFY2(moved.indexOf("00000000000000b1") >= 0 && moved.indexOf("00000000000000b1") < moved.indexOf("00000000000000a1"),
+			qPrintable(moved));
+
+		// Deleting a track with effects: its chain is switched off while it is destroyed, which must not become
+		// an undo step that serializes the half-destroyed track (crash)
+		auto doomed = dynamic_cast<InstrumentTrack*>(Track::create(Track::Type::Instrument, Engine::getSong()));
+		m_peer.nextForeignOp("track.add");
+		EffectChain* doomedChain = doomed->audioBusHandle()->effects();
+		doomedChain->appendEffect(new DummyEffect(doomedChain, QDomElement{}));
+		m_peer.nextForeignOp("effects.set");
+		delete doomed;
+		QVERIFY(!m_peer.nextForeignOp("track.remove").isEmpty());
 	}
 
 private:
