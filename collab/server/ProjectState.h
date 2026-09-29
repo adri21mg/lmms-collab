@@ -63,6 +63,13 @@ private:
 	bool applyPatternOp(const QString& type, const QJsonObject& op);
 	bool applyNotesOp(const QJsonObject& op);
 	bool applyParamOp(const QJsonObject& op);
+	bool applyMixerOp(const QString& type, const QJsonObject& op);
+	//! Mixer channel ids by position, from the <mixer> element (ids added where missing)
+	void indexMixer();
+	//! Settings element of an instrument or sample track (it holds the "mixch" channel number)
+	static QDomElement trackSettings(const QDomElement& track);
+	//! A channel of the mixer or one announced by mixer.add
+	bool isChannel(Id id) const;
 
 	//! Container element and track set for "song" / "patternstore"; null if unknown
 	QDomElement containerElement(const QString& name) const;
@@ -98,6 +105,9 @@ private:
 	QHash<Id, Id> m_clipTrack;                   // track id of each clip
 	QHash<Id, QHash<Id, QDomElement>> m_notes;   // note elements by clip id, note id (MIDI clips only)
 	QSet<Id> m_unsortedClips;
+	QDomElement m_mixer;                         // <mixer> of the song
+	std::vector<Id> m_channels;                  // mixer channel ids by position (0 = master)
+	QSet<Id> m_announcedChannels;                // added by mixer.add, until the mixer.state that follows
 };
 
 } // namespace lmms::collab

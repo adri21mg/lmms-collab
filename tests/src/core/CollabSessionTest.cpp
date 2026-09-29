@@ -44,6 +44,7 @@
 #include "Instrument.h"
 #include "InstrumentTrack.h"
 #include "MidiClip.h"
+#include "Mixer.h"
 #include "Note.h"
 #include "PatternStore.h"
 #include "PatternTrack.h"
@@ -892,6 +893,96 @@ private slots:
 		m_peer.nextForeignOp("effects.set");
 		delete doomed;
 		QVERIFY(!m_peer.nextForeignOp("track.remove").isEmpty());
+	}
+
+	// ---- M5a: mixer ----
+
+	void testMixerSync()
+	{
+		m_peer.drain();
+		Mixer* mixer = Engine::mixer();
+		auto track = dynamic_cast<InstrumentTrack*>(m_clip->getTrack());
+		const QString trackId = proto::idString(track->collabId());
+
+		// A channel added here reaches the peer (with its fields), and the server gets the whole mixer
+		const int local = mixer->createChannel();
+		mixer->mixerChannel(local)->m_name = "Drums";
+		const QString localId = proto::idString(mixer->mixerChannel(local)->collabId());
+		const auto add = m_peer.nextForeignOp("mixer.add");
+		QCOMPARE(add.value("id").toString(), localId);
+		QCOMPARE(m_peer.nextForeignOp("mixer.set").value("v").toObject().value("name").toString(), QString{"Drums"});
+		QVERIFY(m_peer.nextForeignOp("mixer.state").value("xml").toString().contains(localId));
+
+		// Assigning a track to it travels as the channel's id
+		track->mixerChannelModel()->setRange(0, mixer->numChannels() - 1, 1);
+		track->mixerChannelModel()->setValue(local);
+		QCOMPARE(m_peer.nextForeignOp("track.set").value("v").toObject().value("channel").toString(), localId);
+
+		// Its volume is a parameter owned by the channel
+		mixer->mixerChannel(local)->m_volumeModel.setValue(0.5f);
+		const auto volume = m_peer.nextForeignOp("param.set");
+		QCOMPARE(volume.value("owner").toString(), localId);
+		QCOMPARE(volume.value("path").toString(), QString{"c:0"});
+
+		// A channel added by the peer, placed before ours, sending to ours, renamed, with its volume
+		const QString remoteId = "00000000000c0001";
+		m_peer.sendOps({QJsonObject{{"op", "mixer.add"}, {"id", remoteId}, {"index", 1}},
+			QJsonObject{{"op", "mixer.set"}, {"id", remoteId}, {"v", QJsonObject{{"name", "Bass"}}}},
+			QJsonObject{{"op", "mixer.order"}, {"ids", QJsonArray{remoteId, localId}}},
+			QJsonObject{{"op", "mixer.send"}, {"from", remoteId}, {"to", localId}, {"on", true}}});
+		QTRY_COMPARE(mixerChannelIndex(idFromString(remoteId)), 1);
+		QCOMPARE(mixerChannelIndex(idFromString(localId)), 2);
+		QCOMPARE(mixer->mixerChannel(1)->m_name, QString{"Bass"});
+		QVERIFY(mixer->channelSendModel(1, 2) != nullptr);
+		QCOMPARE(track->mixerChannelModel()->value(), 2); // the track followed its channel
+		m_peer.sendOps({QJsonObject{{"op", "param.set"}, {"owner", remoteId}, {"path", "c:0"}, {"v", 0.25},
+			{"k", "lmms::FloatModel/0/2"}}});
+		QTRY_COMPARE(mixer->mixerChannel(1)->m_volumeModel.value(), 0.25f);
+		QVERIFY2(m_peer.nextForeignOp("mixer.add", 500).isEmpty(), "no echo of remote mixer changes");
+		// As a real client does, the peer stores its mixer on the server (here: the same as ours now)
+		QDomDocument mixerDoc;
+		QDomElement mixerParent = mixerDoc.createElement("collab");
+		mixerDoc.appendChild(mixerParent);
+		mixer->saveState(mixerDoc, mixerParent);
+		m_peer.sendOps({QJsonObject{{"op", "mixer.state"}, {"xml", toString(mixerParent.firstChildElement())}}});
+
+		// The peer moves our track to its channel, then removes that channel: the track goes to the master
+		m_peer.sendOps({QJsonObject{{"op", "track.set"}, {"id", trackId}, {"v", QJsonObject{{"channel", remoteId}}}}});
+		QTRY_COMPARE(track->mixerChannelModel()->value(), 1);
+		m_peer.sendOps({QJsonObject{{"op", "mixer.remove"}, {"id", remoteId}}});
+		QTRY_COMPARE(mixerChannelIndex(idFromString(remoteId)), -1);
+		QCOMPARE(track->mixerChannelModel()->value(), 0);
+
+		// Solo stays private: soloing mutes the other channels here, but no mute is sent
+		m_peer.drain();
+		mixer->mixerChannel(0)->m_soloModel.setValue(true);
+		mixer->toggledSolo();
+		QVERIFY(mixer->mixerChannel(1)->m_muteModel.value());
+		QVERIFY2(m_peer.nextForeignOp("mixer.set", 500).isEmpty(), "a solo is not shared");
+		mixer->mixerChannel(0)->m_soloModel.setValue(false);
+		mixer->toggledSolo();
+
+		// The server's copy: our channel with its id and name, the track on the master channel
+		QTRY_VERIFY(serverSnapshot().toString().contains(QString{"cid=\"%1\""}.arg(localId)));
+		const QDomDocument snapshot = serverSnapshot();
+		const QDomNodeList channels = snapshot.elementsByTagName("mixerchannel");
+		QCOMPARE(channels.size(), 2);
+		QCOMPARE(channels.at(1).toElement().attribute("name"), QString{"Drums"});
+		QDomElement settings;
+		const QDomNodeList tracks = snapshot.elementsByTagName("track");
+		for (int i = 0; i < tracks.size(); ++i)
+		{
+			if (tracks.at(i).toElement().attribute("cid") == trackId)
+			{
+				settings = tracks.at(i).firstChildElement("instrumenttrack");
+			}
+		}
+		QCOMPARE(settings.attribute("mixch"), QString{"0"});
+
+		// Removing our channel reaches the peer
+		m_peer.drain();
+		mixer->deleteChannel(mixerChannelIndex(idFromString(localId)));
+		QCOMPARE(m_peer.nextForeignOp("mixer.remove").value("id").toString(), localId);
 	}
 
 private:

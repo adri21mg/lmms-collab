@@ -50,6 +50,14 @@ LMMS_EXPORT QString idToString(collab_id_t id);
 //! Returns 0 if @p str is not a valid id
 LMMS_EXPORT collab_id_t idFromString(const QString& str);
 
+//! Id of the mixer channel at @p index in a project saved without mixer channel ids (older projects):
+//! derived from the position, so every client that loads the same project agrees on it.
+//! Must match proto::defaultChannelId() in collab/protocol/CollabProtocol.h.
+inline constexpr collab_id_t defaultMixerChannelId(int index)
+{
+	return 0x4d49584300000000ull + static_cast<collab_id_t>(index); // "MIXC" + index
+}
+
 //! Kinds of objects whose ids must be unique among all live objects of the project.
 //! (Note ids only need to be unique within their clip; MidiClip takes care of that.)
 enum class IdScope

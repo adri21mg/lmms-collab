@@ -26,6 +26,7 @@
 #define LMMS_MIXER_H
 
 #include "AudioBuffer.h"
+#include "CollabId.h"
 #include "EffectChain.h"
 #include "JournallingObject.h"
 #include "Model.h"
@@ -84,6 +85,10 @@ public:
 	auto color() const -> const std::optional<QColor>& { return m_color; }
 	void setColor(const std::optional<QColor>& color) { m_color = color; }
 
+	//! Identity for collaboration (see CollabId.h); saved as the "cid" attribute
+	collab_id_t collabId() const { return m_collabId; }
+	void setCollabId(collab_id_t id) { m_collabId = id; }
+
 	std::atomic_size_t m_dependenciesMet;
 	void incrementDeps();
 	void processed();
@@ -92,6 +97,7 @@ private:
 	void doProcessing() override;
 	int m_channelIndex;
 	std::optional<QColor> m_color;
+	collab_id_t m_collabId;
 };
 
 class MixerRoute : public QObject

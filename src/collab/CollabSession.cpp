@@ -23,6 +23,7 @@
  */
 
 #include "CollabSession.h"
+#include "CollabSessionUtil.h"
 
 #include <algorithm>
 
@@ -45,11 +46,13 @@
 #include "Engine.h"
 #include "GuiApplication.h"
 #include "InstrumentTrack.h"
+#include "Mixer.h"
 #include "MidiClip.h"
 #include "Note.h"
 #include "PatternEditor.h"
 #include "PatternStore.h"
 #include "PatternTrack.h"
+#include "SampleTrack.h"
 #include "ProjectNotes.h"
 #include "Song.h"
 #include "SongEditor.h"
@@ -80,29 +83,6 @@ bool anySolo(const Track* track)
 bool sharedMute(const Track* track)
 {
 	return anySolo(track) ? track->isMutedBeforeSolo() : track->isMuted();
-}
-
-QString elementToString(const QDomElement& element)
-{
-	QString text;
-	QTextStream stream{&text};
-	element.save(stream, 0);
-	return text;
-}
-
-QString pendingKey(char kind, collab_id_t id, const QString& field)
-{
-	return QString{"%1:%2:%3"}.arg(kind).arg(proto::idString(id), field);
-}
-
-QJsonObject changedFields(const QJsonObject& before, const QJsonObject& after)
-{
-	QJsonObject changed;
-	for (auto it = after.begin(); it != after.end(); ++it)
-	{
-		if (!it.key().startsWith('_') && before.value(it.key()) != it.value()) { changed.insert(it.key(), it.value()); }
-	}
-	return changed;
 }
 
 QJsonObject withoutPrivateKeys(QJsonObject fields)
@@ -536,7 +516,7 @@ void CollabSession::applyTx(const QJsonObject& message)
 			applyRemoteParam(op, m_seq);
 			continue;
 		}
-		if (type == proto::op::TrackState) { continue; } // for the server's copy; we have every change already
+		if (type == proto::op::TrackState || type == proto::op::MixerState) { continue; } // for the server's copy
 		if (type == proto::op::InstrumentSet || type == proto::op::EffectsSet)
 		{
 			flushNoteGroup();
@@ -798,8 +778,18 @@ bool CollabSession::syncsStructure(int trackType, bool inPatternEditor)
 
 QJsonObject CollabSession::trackFields(const Track* track)
 {
-	return {{"name", track->name()}, {"muted", sharedMute(track)},
+	QJsonObject fields{{"name", track->name()}, {"muted", sharedMute(track)},
 		{"color", track->color() ? track->color()->name() : QString{}}};
+	// The mixer channel, by id: numbers change when channels are removed or moved
+	const IntModel* channel = nullptr;
+	if (auto t = dynamic_cast<const InstrumentTrack*>(track)) { channel = const_cast<InstrumentTrack*>(t)->mixerChannelModel(); }
+	if (auto t = dynamic_cast<const SampleTrack*>(track)) { channel = const_cast<SampleTrack*>(t)->mixerChannelModel(); }
+	const int index = channel ? channel->value() : -1;
+	if (index >= 0 && index < static_cast<int>(Engine::mixer()->numChannels()))
+	{
+		fields.insert("channel", proto::idString(Engine::mixer()->mixerChannel(index)->collabId()));
+	}
+	return fields;
 }
 
 
@@ -830,6 +820,19 @@ void CollabSession::applyTrackFields(Track* track, const QJsonObject& fields)
 		// While this user has a (private) solo, only the mute to restore after the solo changes
 		if (anySolo(track)) { track->setMutedBeforeSolo(muted); }
 		else { track->setMuted(muted); }
+	}
+	if (fields.contains("channel"))
+	{
+		IntModel* channel = nullptr;
+		if (auto t = dynamic_cast<InstrumentTrack*>(track)) { channel = t->mixerChannelModel(); }
+		if (auto t = dynamic_cast<SampleTrack*>(track)) { channel = t->mixerChannelModel(); }
+		const int index = mixerChannelIndex(proto::parseId(fields.value("channel")));
+		if (channel && index >= 0)
+		{
+			// Without a GUI nothing else widens the selector's range to the channels that exist
+			if (channel->maxValue() < index) { channel->setRange(0, Engine::mixer()->numChannels() - 1, 1); }
+			channel->setValue(index);
+		}
 	}
 }
 
@@ -1023,6 +1026,7 @@ CollabSession::Structure CollabSession::currentStructure() const
 	addTracks(Engine::getSong(), false);
 	addTracks(Engine::patternStore(), true);
 	s.notes = currentNotes();
+	addMixerStructure(s);
 	return s;
 }
 
@@ -1043,6 +1047,9 @@ void CollabSession::flushStructure()
 		return fields;
 	};
 	auto isNew = [this](collab_id_t trackId) { return !m_structure.tracks.contains(trackId); };
+
+	// The mixer first: tracks sent below may already use new channels
+	flushMixer(current, ops, ctx);
 
 	// New Song Editor tracks are sent complete (instrument, settings, clips); a new pattern also carries
 	// its content: its clip in every Pattern Editor track that is already shared
@@ -1217,7 +1224,8 @@ void CollabSession::applyRemoteStructureOp(const QJsonObject& op)
 	};
 
 	m_applyingRemote = true;
-	if (type == proto::op::TrackAdd)
+	if (type.startsWith("mixer.")) { applyRemoteMixerOp(op); }
+	else if (type == proto::op::TrackAdd)
 	{
 		QDomDocument doc;
 		TrackContainer* container = containerNamed(op.value("container").toString());

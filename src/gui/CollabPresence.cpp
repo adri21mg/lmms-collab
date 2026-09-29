@@ -560,8 +560,9 @@ QString CollabPresence::windowKeyOf(QWidget* content)
 	{
 		auto controls = dynamic_cast<EffectControls*>(dialog->model());
 		const Effect* effect = controls ? controls->effect() : nullptr;
-		const Track* track = effect ? collab::trackOfEffect(effect) : nullptr;
-		if (track) { return QString{"%1:%2"}.arg(key("effect", track->collabId())).arg(collab::effectIndex(effect)); }
+		// Effects of a track or of a mixer channel
+		const collab_id_t owner = effect ? collab::effectOwner(effect) : 0;
+		if (owner) { return QString{"%1:%2"}.arg(key("effect", owner)).arg(collab::effectIndex(effect)); }
 		return {};
 	}
 	if (content == gui->mixerView()) { return "mixer"; }
@@ -899,9 +900,9 @@ QString CollabPresence::describeWindow(const QString& window)
 	}
 	if (window.startsWith("effect:"))
 	{
-		Track* t = trackById(collab::idFromString(window.section(':', 1, 1)));
-		const Effect* e = collab::effectAt(t, window.section(':', 2).toInt());
-		return e ? tr("Effect: %1 (%2)").arg(e->displayName(), t->name()) : tr("Effect");
+		const collab_id_t owner = collab::idFromString(window.section(':', 1, 1));
+		const Effect* e = collab::effectAt(owner, window.section(':', 2).toInt());
+		return e ? tr("Effect: %1 (%2)").arg(e->displayName(), collab::effectOwnerName(owner)) : tr("Effect");
 	}
 	return {};
 }
@@ -937,9 +938,9 @@ void CollabPresence::goTo(const QString& clientId)
 	}
 	else if (window.startsWith("effect:"))
 	{
-		// The effect's window if it was opened before; otherwise its track's instrument window
-		const Effect* effect = collab::effectAt(trackById(collab::idFromString(window.section(':', 1, 1))),
-			window.section(':', 2).toInt());
+		// The effect's window if it was opened before; otherwise its track's instrument window or the mixer
+		const collab_id_t owner = collab::idFromString(window.section(':', 1, 1));
+		const Effect* effect = collab::effectAt(owner, window.section(':', 2).toInt());
 		for (QMdiSubWindow* subWindow : m_mainWindow->workspace()->subWindowList())
 		{
 			auto dialog = dynamic_cast<EffectControlDialog*>(subWindow->widget());
@@ -949,6 +950,12 @@ void CollabPresence::goTo(const QString& clientId)
 				bringToFront(m_mainWindow, dialog);
 				return;
 			}
+		}
+		if (const int channel = collab::mixerChannelIndex(owner); channel >= 0)
+		{
+			gui->mixerView()->setCurrentMixerChannel(channel);
+			bringToFront(m_mainWindow, gui->mixerView());
+			return;
 		}
 		const QString trackWindow = "instrument:" + window.section(':', 1, 1);
 		it->second.lastWindow = trackWindow;

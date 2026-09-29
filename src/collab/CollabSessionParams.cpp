@@ -61,6 +61,7 @@
 #include "MeterModel.h"
 #include "Microtuner.h"
 #include "MidiPort.h"
+#include "Mixer.h"
 #include "PatternStore.h"
 #include "PluginFactory.h"
 #include "SampleTrack.h"
@@ -373,6 +374,11 @@ void CollabSession::refreshParamIndex()
 			}
 		}
 	}
+	for (int i = 0; i < static_cast<int>(Engine::mixer()->numChannels()); ++i)
+	{
+		MixerChannel* channel = Engine::mixer()->mixerChannel(i);
+		if (m_structure.channelInfo.contains(channel->collabId())) { add(channel->collabId(), enumerateChannelParams(channel)); }
+	}
 	m_paramIndexAge.start();
 }
 
@@ -524,6 +530,7 @@ void CollabSession::sendTrackStates()
 {
 	if (m_state != State::Live) { return; }
 	QJsonArray ops;
+	bool mixerState = false;
 	for (auto it = m_trackParams.begin(); it != m_trackParams.end(); ++it)
 	{
 		TrackParamState& state = it.value();
@@ -535,7 +542,9 @@ void CollabSession::sendTrackStates()
 			ops.append(QJsonObject{{"op", proto::op::TrackState}, {"id", proto::idString(it.key())},
 				{"xml", settingsXml(track)}});
 		}
+		else if (findMixerChannel(it.key())) { mixerState = true; } // the server stores the whole mixer
 	}
+	if (mixerState) { ops.append(QJsonObject{{"op", proto::op::MixerState}, {"xml", mixerXml()}}); }
 	if (!ops.isEmpty()) { sendOps(ops); }
 }
 
@@ -573,11 +582,17 @@ void CollabSession::rebasePlugins(Track* track)
 		state.instrumentIdentity = instrumentIdentity(instrumentTrack);
 		state.instrumentXml = instrumentXml(instrumentTrack);
 	}
-	if (EffectChain* chain = effectsOf(track))
-	{
-		state.effectsIdentity = effectsIdentity(chain);
-		state.effectsXml = effectsXml(chain);
-	}
+	if (EffectChain* chain = effectsOf(track)) { rebaseEffects(track->collabId(), chain); }
+	state.localParamsTouched = state.remoteParamsTouched = false;
+	state.known = true;
+}
+
+
+void CollabSession::rebaseEffects(collab_id_t owner, EffectChain* chain)
+{
+	PluginState& state = m_plugins[owner];
+	state.effectsIdentity = effectsIdentity(chain);
+	state.effectsXml = effectsXml(chain);
 	state.localParamsTouched = state.remoteParamsTouched = false;
 	state.known = true;
 }
@@ -596,7 +611,7 @@ QSet<collab_id_t> CollabSession::tracksBeingEdited()
 		else if (auto dialog = dynamic_cast<gui::EffectControlDialog*>(content))
 		{
 			auto controls = dynamic_cast<EffectControls*>(dialog->model());
-			if (Track* track = controls ? trackOfEffect(controls->effect()) : nullptr) { tracks.insert(track->collabId()); }
+			if (const collab_id_t owner = controls ? effectOwner(controls->effect()) : 0) { tracks.insert(owner); }
 		}
 	}
 	return tracks;
@@ -672,38 +687,62 @@ void CollabSession::flushPlugins()
 					changedTracks.insert(track);
 				}
 			}
-			if (chain)
-			{
-				const QString identity = effectsIdentity(chain);
-				QString xml;
-				bool send = identity != state.effectsIdentity;
-				if (!send && compareState)
-				{
-					xml = effectsXml(chain);
-					send = xml != state.effectsXml && !onlyRemoteKnobs;
-					if (!send) { state.effectsXml = xml; }
-				}
-				if (send)
-				{
-					if (xml.isEmpty()) { xml = effectsXml(chain); }
-					ops.append(QJsonObject{{"op", proto::op::EffectsSet}, {"track", proto::idString(id)}, {"xml", xml}});
-					state.effectsIdentity = identity;
-					state.effectsXml = xml;
-					resetParamBaselines(id, "fx:");
-					changedTracks.insert(track);
-					for (Effect* effect : chain->effects()) { effect->setProperty("collabEffectIdShared", true); }
-				}
-			}
+			if (chain && flushEffects(id, "track", chain, state, compareState, onlyRemoteKnobs)) { changedTracks.insert(track); }
 			if (compareState) { state.localParamsTouched = state.remoteParamsTouched = false; }
 		}
 	}
-	// The server stores the result as the track's settings
+	// The effects of mixer channels
+	bool mixerChanged = false;
+	for (int i = 0; i < static_cast<int>(Engine::mixer()->numChannels()); ++i)
+	{
+		MixerChannel* channel = Engine::mixer()->mixerChannel(i);
+		const collab_id_t id = channel->collabId();
+		if (!m_structure.channelInfo.contains(id)) { continue; }
+		PluginState& state = m_plugins[id];
+		if (!state.known)
+		{
+			rebaseEffects(id, &channel->m_fxChain);
+			continue;
+		}
+		const bool quiet = !state.lastParamActivity.isValid() || state.lastParamActivity.elapsed() >= 1000;
+		const bool compareState = checkState.contains(id) && quiet;
+		const bool onlyRemoteKnobs = state.remoteParamsTouched && !state.localParamsTouched;
+		mixerChanged |= flushEffects(id, "channel", &channel->m_fxChain, state, compareState, onlyRemoteKnobs);
+		if (compareState) { state.localParamsTouched = state.remoteParamsTouched = false; }
+	}
+	// The server stores the result as the track's settings / the mixer
 	for (Track* track : changedTracks)
 	{
-		ops.append(QJsonObject{{"op", proto::op::TrackState}, {"id", proto::idString(track->collabId())},
+		m_pluginOps.append(QJsonObject{{"op", proto::op::TrackState}, {"id", proto::idString(track->collabId())},
 			{"xml", settingsXml(track)}});
 	}
+	if (mixerChanged) { m_pluginOps.append(QJsonObject{{"op", proto::op::MixerState}, {"xml", mixerXml()}}); }
+	for (const QJsonValue& op : m_pluginOps) { ops.append(op); }
+	m_pluginOps = QJsonArray{};
 	if (!ops.isEmpty()) { sendOps(ops); }
+}
+
+
+bool CollabSession::flushEffects(collab_id_t owner, const char* ownerKey, EffectChain* chain, PluginState& state,
+	bool compareState, bool onlyRemoteKnobs)
+{
+	const QString identity = effectsIdentity(chain);
+	QString xml;
+	bool send = identity != state.effectsIdentity;
+	if (!send && compareState)
+	{
+		xml = effectsXml(chain);
+		send = xml != state.effectsXml && !onlyRemoteKnobs;
+		if (!send) { state.effectsXml = xml; }
+	}
+	if (!send) { return false; }
+	if (xml.isEmpty()) { xml = effectsXml(chain); }
+	m_pluginOps.append(QJsonObject{{"op", proto::op::EffectsSet}, {ownerKey, proto::idString(owner)}, {"xml", xml}});
+	state.effectsIdentity = identity;
+	state.effectsXml = xml;
+	resetParamBaselines(owner, "fx:");
+	for (Effect* effect : chain->effects()) { effect->setProperty("collabEffectIdShared", true); }
+	return true;
 }
 
 
@@ -753,8 +792,10 @@ void CollabSession::applyRemoteInstrument(const QJsonObject& op)
 
 void CollabSession::applyRemoteEffects(const QJsonObject& op)
 {
-	Track* track = findTrack(proto::parseId(op.value("track")));
-	EffectChain* chain = track ? effectsOf(track) : nullptr;
+	// The effects of a track or of a mixer channel
+	const collab_id_t owner = proto::parseId(op.contains("channel") ? op.value("channel") : op.value("track"));
+	Track* track = op.contains("channel") ? nullptr : findTrack(owner);
+	EffectChain* chain = op.contains("channel") ? effectChainOf(owner) : track ? effectsOf(track) : nullptr;
 	QDomDocument doc;
 	if (!chain || !doc.setContent(op.value("xml").toString()) || doc.documentElement().tagName() != "fxchain") { return; }
 
@@ -871,42 +912,62 @@ void CollabSession::applyRemoteEffects(const QJsonObject& op)
 		}
 	}
 	log(QString{"remote effects for %1: %2 effect(s), %3 new, %4 updated, %5 removed"}
-		.arg(proto::idString(track->collabId())).arg(chain->effects().size()).arg(created).arg(restored).arg(removed));
-	resetParamBaselines(track->collabId(), "fx:");
-	rebasePlugins(track);
+		.arg(proto::idString(owner)).arg(chain->effects().size()).arg(created).arg(restored).arg(removed));
+	resetParamBaselines(owner, "fx:");
+	if (track) { rebasePlugins(track); }
+	else { rebaseEffects(owner, chain); }
 }
 
 
-Track* trackOfEffect(const Effect* effect)
+collab_id_t effectOwner(const Effect* effect)
 {
+	auto holds = [effect](const EffectChain* chain) {
+		return chain && std::find(chain->effects().begin(), chain->effects().end(), effect) != chain->effects().end();
+	};
 	for (const TrackContainer* container : {static_cast<TrackContainer*>(Engine::getSong()),
 		static_cast<TrackContainer*>(Engine::patternStore())})
 	{
 		for (Track* track : container->tracks())
 		{
-			const EffectChain* chain = effectsOf(track);
-			if (chain && std::find(chain->effects().begin(), chain->effects().end(), effect) != chain->effects().end())
-			{
-				return track;
-			}
+			if (holds(effectsOf(track))) { return track->collabId(); }
 		}
 	}
-	return nullptr;
+	for (int i = 0; i < static_cast<int>(Engine::mixer()->numChannels()); ++i)
+	{
+		MixerChannel* channel = Engine::mixer()->mixerChannel(i);
+		if (holds(&channel->m_fxChain)) { return channel->collabId(); }
+	}
+	return 0;
+}
+
+
+EffectChain* effectChainOf(collab_id_t owner)
+{
+	if (auto track = const_cast<Track*>(static_cast<const Track*>(findOwner(IdScope::Track, owner)))) { return effectsOf(track); }
+	MixerChannel* channel = findMixerChannel(owner);
+	return channel ? &channel->m_fxChain : nullptr;
+}
+
+
+QString effectOwnerName(collab_id_t owner)
+{
+	if (auto track = static_cast<const Track*>(findOwner(IdScope::Track, owner))) { return track->name(); }
+	MixerChannel* channel = findMixerChannel(owner);
+	return channel ? channel->m_name : QString{};
 }
 
 
 int effectIndex(const Effect* effect)
 {
-	Track* track = trackOfEffect(effect);
-	const EffectChain* chain = track ? effectsOf(track) : nullptr;
+	const EffectChain* chain = effectChainOf(effectOwner(effect));
 	if (!chain) { return -1; }
 	return static_cast<int>(std::find(chain->effects().begin(), chain->effects().end(), effect) - chain->effects().begin());
 }
 
 
-Effect* effectAt(Track* track, int index)
+Effect* effectAt(collab_id_t owner, int index)
 {
-	const EffectChain* chain = track ? effectsOf(track) : nullptr;
+	const EffectChain* chain = effectChainOf(owner);
 	if (!chain || index < 0 || index >= static_cast<int>(chain->effects().size())) { return nullptr; }
 	return chain->effects()[index];
 }

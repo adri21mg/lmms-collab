@@ -46,7 +46,8 @@
 //     {op:"note.remove", clip, id}
 //     {op:"track.add",   container:"song", index, xml}             complete <track> element (with its clips)
 //     {op:"track.remove", id}
-//     {op:"track.set",   id, v:{name, muted, color}}               any subset; color "" = no color
+//     {op:"track.set",   id, v:{name, muted, color, channel}}      any subset; color "" = no color;
+//                                                                   channel = id of its mixer channel
 //     {op:"track.order", container:"song", ids:[...]}              order of the shared tracks
 //     {op:"clip.add",    track, xml}                               complete clip element (with its notes)
 //     {op:"clip.remove", id}
@@ -65,7 +66,18 @@
 //     {op:"instrument.set", track, xml}                            the track's whole <instrument> (other plugin,
 //         preset, or plugin state that is not made of parameters: samples, ZynAddSubFX, VST...)
 //     {op:"effects.set", track, xml}                               the track's whole <fxchain> (effects added,
-//         removed or moved, or their inner state changed). Both are relayed; the sender adds a track.state
+//         removed or moved, or their inner state changed). Both are relayed; the sender adds a track.state.
+//         effects.set can also carry "channel" instead of "track": the effects of a mixer channel.
+//     Mixer (milestone M5a). Channels have ids ("cid" on <mixerchannel>; older projects: defaultChannelId());
+//     the master channel is always first. These are relayed; with each of them the sender also sends
+//     {op:"mixer.state", xml} (the whole <mixer>), which the server stores, as for knobs that come to rest.
+//     {op:"mixer.add",    id, index}                               new channel (LMMS appends, then moves it)
+//     {op:"mixer.remove", id}                                      tracks on it go to the master channel
+//     {op:"mixer.order",  ids:[...]}                               order of the channels after the master
+//     {op:"mixer.set",    id, v:{name, color, muted}}              any subset (solo is private, like tracks')
+//     {op:"mixer.send",   from, to, on}                            a send between two channels appears/disappears
+//     param.set with a channel as owner: path "c:0" = volume, "s:<channelId>" = amount sent to that channel,
+//     "fx:<n>" = parameters of the channel's effects
 // Tracks live in the "song" container (Song Editor) or the "patternstore" container (Pattern Editor).
 // Pattern N is the N-th pattern track in song order; its content is the N-th clip of every Pattern Editor
 // track, so reordering pattern tracks (track.order) also reorders those clips.
@@ -151,7 +163,20 @@ inline constexpr auto ParamSet = "param.set";
 inline constexpr auto TrackState = "track.state";
 inline constexpr auto InstrumentSet = "instrument.set";
 inline constexpr auto EffectsSet = "effects.set";
+inline constexpr auto MixerAdd = "mixer.add";
+inline constexpr auto MixerRemove = "mixer.remove";
+inline constexpr auto MixerOrder = "mixer.order";
+inline constexpr auto MixerSet = "mixer.set";
+inline constexpr auto MixerSend = "mixer.send";
+inline constexpr auto MixerState = "mixer.state";
 } // namespace op
+
+//! Id of the mixer channel at @p index in a project saved without mixer channel ids.
+//! Must match collab::defaultMixerChannelId() in include/CollabId.h.
+inline constexpr std::uint64_t defaultChannelId(int index)
+{
+	return 0x4d49584300000000ull + static_cast<std::uint64_t>(index);
+}
 
 //! Owner of the song-wide parameters in param.set
 inline constexpr auto SongOwner = "song";
@@ -166,7 +191,7 @@ struct SongParam
 };
 const std::vector<SongParam>& songParams();
 
-//! "t:<n>" or "fx:<n>"
+//! "t:<n>", "i:<n>", "mt:<n>", "fx:<n>" (tracks), "c:0", "s:<channelId>" (mixer channels)
 bool isValidParamPath(const QString& path);
 
 //! Track containers: the Song Editor and the Pattern Editor
@@ -178,7 +203,7 @@ inline constexpr int MaxNotesSize = 1024 * 1024;
 //! Description of one synchronized attribute of a track or clip
 struct FieldSpec
 {
-	enum class Kind { Int, Bool, String, Color };
+	enum class Kind { Int, Bool, String, Color, Id };
 	const char* name;
 	Kind kind;
 	int min = 0;
@@ -189,6 +214,8 @@ struct FieldSpec
 const std::vector<FieldSpec>& trackFields();
 //! Shared clip attributes; "steps" only exists for MIDI clips
 const std::vector<FieldSpec>& clipFields();
+//! Shared mixer channel attributes (solo is private)
+const std::vector<FieldSpec>& mixerChannelFields();
 
 //! Checks every present field of @p values against @p spec (unknown fields are invalid)
 bool validFields(const QJsonObject& values, const std::vector<FieldSpec>& spec);

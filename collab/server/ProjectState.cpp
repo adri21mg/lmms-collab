@@ -129,6 +129,7 @@ void setFields(QDomElement& element, const QJsonObject& values, const std::vecto
 			if (it.value().toString().isEmpty()) { element.removeAttribute(it.key()); }
 			else { element.setAttribute(it.key(), it.value().toString()); }
 			break;
+		case proto::FieldSpec::Kind::Id: element.setAttribute(it.key(), it.value().toString()); break;
 		}
 	}
 }
@@ -183,6 +184,10 @@ void ProjectState::normalize(QDomElement root)
 	}
 
 	if (root.tagName() == "track") { normalizeSolo({root}); }
+	// Mixer solo is private too (LMMS does not keep the mute from before a solo there)
+	if (root.tagName() == "mixerchannel") { root.setAttribute("soloed", "0"); }
+	const QDomNodeList channels = root.elementsByTagName("mixerchannel");
+	for (int i = 0; i < channels.size(); ++i) { channels.at(i).toElement().setAttribute("soloed", "0"); }
 	const QDomNodeList containers = root.elementsByTagName("trackcontainer");
 	for (int i = 0; i < containers.size(); ++i) { normalizeSolo(childTracks(containers.at(i).toElement())); }
 }
@@ -206,6 +211,40 @@ void ProjectState::index()
 		if (c.attribute("type") == proto::SongContainer) { m_songContainer = c; }
 	}
 	for (const QDomElement& track : childTracks(m_songContainer)) { indexTrack(track, true); }
+	indexMixer();
+}
+
+
+void ProjectState::indexMixer()
+{
+	m_channels.clear();
+	m_announcedChannels.clear();
+	m_mixer = m_doc.documentElement().firstChildElement("song").firstChildElement("mixer");
+	for (QDomElement c = m_mixer.firstChildElement("mixerchannel"); !c.isNull(); c = c.nextSiblingElement("mixerchannel"))
+	{
+		const int num = c.attribute("num").toInt();
+		if (num < 0 || num > 10000) { continue; }
+		if (idOf(c) == 0) { c.setAttribute("cid", proto::idString(proto::defaultChannelId(num))); }
+		if (static_cast<std::size_t>(num) >= m_channels.size()) { m_channels.resize(num + 1, 0); }
+		m_channels[num] = idOf(c);
+	}
+	if (m_channels.empty()) { m_channels.push_back(proto::defaultChannelId(0)); } // just the master
+}
+
+
+bool ProjectState::isChannel(Id id) const
+{
+	return id != 0 && (std::find(m_channels.begin(), m_channels.end(), id) != m_channels.end()
+		|| m_announcedChannels.contains(id));
+}
+
+
+QDomElement ProjectState::trackSettings(const QDomElement& track)
+{
+	const int type = track.attribute("type").toInt();
+	if (type == InstrumentTrack) { return track.firstChildElement("instrumenttrack"); }
+	if (type == SampleTrack) { return track.firstChildElement("sampletrack"); }
+	return {};
 }
 
 
@@ -344,6 +383,14 @@ bool ProjectState::apply(const QJsonObject& op)
 	if (type.startsWith("pattern.")) { return applyPatternOp(type, op); }
 	if (type == proto::op::NotesSet) { return applyNotesOp(op); }
 	if (type == proto::op::ParamSet) { return applyParamOp(op); }
+	if (type.startsWith("mixer.")) { return applyMixerOp(type, op); }
+	if (type == proto::op::EffectsSet && op.contains("channel"))
+	{
+		// A mixer channel's effects: relayed, stored with the mixer.state that comes with them
+		QDomDocument fragment;
+		return isChannel(proto::parseId(op.value("channel"))) && op.value("xml").isString()
+			&& fragment.setContent(op.value("xml").toString()) && fragment.documentElement().tagName() == "fxchain";
+	}
 	if (type == proto::op::InstrumentSet || type == proto::op::EffectsSet)
 	{
 		// Relayed to the other clients; the sender stores the result with a track.state in the same tx
@@ -376,9 +423,10 @@ bool ProjectState::applyParamOp(const QJsonObject& op)
 		return true;
 	}
 
-	// Track parameters are only relayed; the track's settings are stored by track.state
-	const Id trackId = proto::parseId(op.value("owner"));
-	return (m_songTracks.contains(trackId) || m_patternEditorTracks.contains(trackId)) && proto::isValidParamPath(path);
+	// Track and mixer channel parameters are only relayed; track.state / mixer.state store them
+	const Id owner = proto::parseId(op.value("owner"));
+	return (m_songTracks.contains(owner) || m_patternEditorTracks.contains(owner) || isChannel(owner))
+		&& proto::isValidParamPath(path);
 }
 
 
@@ -518,6 +566,15 @@ bool ProjectState::applyTrackOp(const QString& type, const QJsonObject& op)
 	{
 		QJsonObject values = op.value("v").toObject();
 		if (values.isEmpty() || !proto::validFields(values, proto::trackFields())) { return false; }
+		if (values.contains("channel"))
+		{
+			// Stored as LMMS does: the channel's number in the track's settings
+			const auto it = std::find(m_channels.begin(), m_channels.end(), proto::parseId(values.value("channel")));
+			QDomElement settings = trackSettings(track);
+			if (it == m_channels.end() || settings.isNull()) { return false; }
+			settings.setAttribute("mixch", static_cast<int>(it - m_channels.begin()));
+			values.remove("channel");
+		}
 		setFields(track, values, proto::trackFields());
 		if (values.contains("muted")) { track.setAttribute("mutedBeforeSolo", values.value("muted").toBool() ? 1 : 0); }
 		return true;
@@ -706,6 +763,85 @@ bool ProjectState::applyNotesOp(const QJsonObject& op)
 	while (notes.hasChildNodes()) { notes.removeChild(notes.firstChild()); }
 	notes.appendChild(m_doc.createCDATASection(text.toString()));
 	return true;
+}
+
+
+bool ProjectState::applyMixerOp(const QString& type, const QJsonObject& op)
+{
+	const Id master = m_channels.front();
+
+	if (type == proto::op::MixerState)
+	{
+		QDomDocument fragment;
+		if (!op.value("xml").isString() || !fragment.setContent(op.value("xml").toString())) { return false; }
+		QDomElement mixer = fragment.documentElement();
+		if (mixer.tagName() != "mixer") { return false; }
+		// Channels numbered 0..n-1 in order, each with its own id
+		QSet<Id> ids;
+		int count = 0;
+		for (QDomElement c = mixer.firstChildElement("mixerchannel"); !c.isNull(); c = c.nextSiblingElement("mixerchannel"))
+		{
+			const Id id = idOf(c);
+			if (c.attribute("num").toInt() != count++ || id == 0 || ids.contains(id)) { return false; }
+			ids.insert(id);
+		}
+		if (count == 0 || count > 10000) { return false; }
+		normalize(mixer);
+
+		// Tracks refer to channels by number: they follow their channel to its new number
+		const std::vector<Id> oldChannels = m_channels;
+		QDomElement imported = m_doc.importNode(mixer, true).toElement();
+		if (m_mixer.isNull()) { m_doc.documentElement().firstChildElement("song").appendChild(imported); }
+		else { m_mixer.parentNode().replaceChild(imported, m_mixer); }
+		indexMixer();
+		for (const QDomElement& track : m_tracks)
+		{
+			QDomElement settings = trackSettings(track);
+			if (settings.isNull() || !settings.hasAttribute("mixch")) { continue; }
+			const int old = settings.attribute("mixch").toInt();
+			const Id id = old >= 0 && static_cast<std::size_t>(old) < oldChannels.size() ? oldChannels[old] : 0;
+			const auto it = std::find(m_channels.begin(), m_channels.end(), id);
+			settings.setAttribute("mixch", it == m_channels.end() ? 0 : static_cast<int>(it - m_channels.begin()));
+		}
+		return true;
+	}
+
+	if (type == proto::op::MixerAdd)
+	{
+		const Id id = proto::parseId(op.value("id"));
+		if (id == 0 || isChannel(id) || op.value("index").toInt(-1) < 1) { return false; }
+		m_announcedChannels.insert(id); // stored by the mixer.state that follows
+		return true;
+	}
+	if (type == proto::op::MixerRemove)
+	{
+		const Id id = proto::parseId(op.value("id"));
+		return isChannel(id) && id != master;
+	}
+	if (type == proto::op::MixerOrder)
+	{
+		QSet<Id> listed;
+		for (const QJsonValue& v : op.value("ids").toArray())
+		{
+			const Id id = proto::parseId(v);
+			if (!isChannel(id) || id == master || listed.contains(id)) { return false; }
+			listed.insert(id);
+		}
+		return !listed.isEmpty();
+	}
+	if (type == proto::op::MixerSet)
+	{
+		const QJsonObject values = op.value("v").toObject();
+		return isChannel(proto::parseId(op.value("id"))) && !values.isEmpty()
+			&& proto::validFields(values, proto::mixerChannelFields());
+	}
+	if (type == proto::op::MixerSend)
+	{
+		const Id from = proto::parseId(op.value("from"));
+		const Id to = proto::parseId(op.value("to"));
+		return isChannel(from) && isChannel(to) && from != to && from != master && op.value("on").isBool();
+	}
+	return false;
 }
 
 

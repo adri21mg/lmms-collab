@@ -157,7 +157,15 @@ const std::vector<FieldSpec>& trackFields()
 {
 	using K = FieldSpec::Kind;
 	static const std::vector<FieldSpec> fields = {
-		{"name", K::String}, {"muted", K::Bool}, {"color", K::Color}};
+		{"name", K::String}, {"muted", K::Bool}, {"color", K::Color}, {"channel", K::Id}};
+	return fields;
+}
+
+
+const std::vector<FieldSpec>& mixerChannelFields()
+{
+	using K = FieldSpec::Kind;
+	static const std::vector<FieldSpec> fields = {{"name", K::String}, {"muted", K::Bool}, {"color", K::Color}};
 	return fields;
 }
 
@@ -202,6 +210,9 @@ bool validFields(const QJsonObject& values, const std::vector<FieldSpec>& spec)
 			if (!v.isString() || !re.match(v.toString()).hasMatch()) { return false; }
 			break;
 		}
+		case FieldSpec::Kind::Id:
+			if (parseId(v) == 0) { return false; }
+			break;
 		}
 	}
 	return true;
@@ -219,7 +230,7 @@ const std::vector<SongParam>& songParams()
 
 bool isValidParamPath(const QString& path)
 {
-	static const QRegularExpression re{"^(t|i|mt|fx):[0-9]{1,5}$"};
+	static const QRegularExpression re{"^((t|i|mt|fx):[0-9]{1,5}|c:0|s:[0-9a-f]{16})$"};
 	return re.match(path).hasMatch();
 }
 

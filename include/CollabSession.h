@@ -54,7 +54,9 @@ namespace lmms
 class AutomatableModel;
 class Clip;
 class Effect;
+class EffectChain;
 class MidiClip;
+class MixerChannel;
 class Note;
 class Track;
 class TrackContainer;
@@ -167,6 +169,14 @@ private:
 		QSet<collab_id_t> patternEditorTracks;
 		QHash<collab_id_t, ClipInfo> clips;       //!< every shared clip (Pattern Editor clips: no "pos")
 		std::optional<QString> notes;             //!< project notes (only with a GUI)
+
+		struct ChannelInfo
+		{
+			QJsonObject fields;                   //!< name, color, (shared) muted
+			QList<collab_id_t> sends;             //!< channels this one sends to
+		};
+		QList<collab_id_t> channels;              //!< mixer channels in order, the master first
+		QHash<collab_id_t, ChannelInfo> channelInfo;
 	};
 
 	enum class Kind { Track, Clip, Note, Param };
@@ -263,6 +273,17 @@ private:
 	//! Project notes currently shown, if there is a GUI
 	static std::optional<QString> currentNotes();
 
+	// Mixer (milestone M5a)
+	//! Adds the mixer's channels, their fields and sends to @p s
+	static void addMixerStructure(Structure& s);
+	//! Appends the operations for mixer changes since the baseline (and a mixer.state if there are any)
+	void flushMixer(const Structure& current, QJsonArray& ops, qint64 ctx);
+	void applyRemoteMixerOp(const QJsonObject& op);
+	//! The whole <mixer> as the server stores it (solo removed: it is private)
+	static QString mixerXml();
+	//! Parameters of a mixer channel: "c:0" volume, "s:<channel>" send amounts, "fx:<n>" its effects
+	static std::vector<std::pair<QString, AutomatableModel*>> enumerateChannelParams(MixerChannel* channel);
+
 	// Parameters (knobs, sliders, buttons, combo boxes of tracks, instruments, effects; song tempo etc.)
 	//! Parameters of a track: "t:<n>" in its own object tree, "fx:<n>" in its effect chain
 	static std::vector<std::pair<QString, AutomatableModel*>> enumerateParams(Track* track);
@@ -288,7 +309,14 @@ private:
 	void applyRemoteEffects(const QJsonObject& op);
 	//! Records the current instrument/effects of a track as synchronized
 	void rebasePlugins(Track* track);
-	//! Tracks whose instrument or effect windows are open (their plugin state may change without knobs)
+	void rebaseEffects(collab_id_t owner, EffectChain* chain);
+	struct PluginState;
+	//! Queues effects.set for the effects of a track or mixer channel ("track"/"channel": @p ownerKey) if
+	//! they changed; returns true if so
+	bool flushEffects(collab_id_t owner, const char* ownerKey, EffectChain* chain, PluginState& state,
+		bool compareState, bool onlyRemoteKnobs);
+	//! Tracks and mixer channels whose instrument or effect windows are open (their plugin state may change
+	//! without knobs)
 	static QSet<collab_id_t> tracksBeingEdited();
 
 	// Undo
@@ -357,6 +385,7 @@ private:
 		bool known = false;         //!< the state above was taken at least once
 	};
 	QHash<collab_id_t, PluginState> m_plugins;
+	QJsonArray m_pluginOps; //!< effects.set of the current flushPlugins(), before the states that store them
 	QSet<collab_id_t> m_editedTracks;  //!< tracks with open plugin windows at the last check
 	QSet<collab_id_t> m_externalGuiTracks; //!< edited tracks whose plugins have a window of their own
 	QElapsedTimer m_opaqueCheck;
@@ -367,11 +396,19 @@ private:
 	bool m_recordGestures = true;
 };
 
-//! The track whose effect chain holds @p effect (nullptr: e.g. a mixer channel's effect)
-LMMS_EXPORT Track* trackOfEffect(const Effect* effect);
-//! Position of @p effect in its track's chain, or -1
+//! Id of the track or mixer channel whose effect chain holds @p effect, or 0
+LMMS_EXPORT collab_id_t effectOwner(const Effect* effect);
+//! Effect chain of a track or mixer channel, or nullptr
+LMMS_EXPORT EffectChain* effectChainOf(collab_id_t owner);
+//! Name of the track or mixer channel @p owner
+LMMS_EXPORT QString effectOwnerName(collab_id_t owner);
+//! Position of @p effect in its chain, or -1
 LMMS_EXPORT int effectIndex(const Effect* effect);
-LMMS_EXPORT Effect* effectAt(Track* track, int index);
+LMMS_EXPORT Effect* effectAt(collab_id_t owner, int index);
+//! The mixer channel with id @p id, or nullptr
+LMMS_EXPORT MixerChannel* findMixerChannel(collab_id_t id);
+//! Position of the mixer channel @p id, or -1
+LMMS_EXPORT int mixerChannelIndex(collab_id_t id);
 
 } // namespace collab
 

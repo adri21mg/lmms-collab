@@ -72,7 +72,8 @@ MixerChannel::MixerChannel( int idx, Model * _parent ) :
 	m_lock(),
 	m_queued( false ),
 	m_dependenciesMet(0),
-	m_channelIndex(idx)
+	m_channelIndex(idx),
+	m_collabId(collab::defaultMixerChannelId(idx))
 {
 	m_buffer.allocateInterleavedBuffer();
 }
@@ -262,6 +263,8 @@ int Mixer::createChannel()
 	const int index = m_mixerChannels.size();
 	// create new channel
 	m_mixerChannels.push_back( new MixerChannel( index, this ) );
+	// a channel added by the user is a new object for collaboration (loading sets the saved id)
+	m_mixerChannels.back()->setCollabId(collab::newId());
 
 	// reset channel state
 	clearChannel( index );
@@ -804,6 +807,7 @@ void Mixer::saveSettings( QDomDocument & _doc, QDomElement & _this )
 		ch->m_muteModel.saveSettings( _doc, mixch, "muted" );
 		ch->m_soloModel.saveSettings( _doc, mixch, "soloed" );
 		mixch.setAttribute("num", static_cast<qulonglong>(i));
+		mixch.setAttribute(collab::IdAttribute, collab::idToString(ch->collabId()));
 		mixch.setAttribute( "name", ch->m_name );
 		if (const auto& color = ch->color()) { mixch.setAttribute("color", color->name()); }
 
@@ -848,6 +852,9 @@ void Mixer::loadSettings( const QDomElement & _this )
 		// allocate enough channels
 		allocateChannelsTo( num );
 
+		// Projects saved without ids get ids derived from the position (the same on every client)
+		const collab_id_t id = collab::idFromString(mixch.attribute(collab::IdAttribute));
+		m_mixerChannels[num]->setCollabId(id != 0 ? id : collab::defaultMixerChannelId(num));
 		m_mixerChannels[num]->m_volumeModel.loadSettings( mixch, "volume" );
 		m_mixerChannels[num]->m_muteModel.loadSettings( mixch, "muted" );
 		m_mixerChannels[num]->m_soloModel.loadSettings( mixch, "soloed" );
