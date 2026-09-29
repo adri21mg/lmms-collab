@@ -26,6 +26,10 @@
 			"default-features": false
 		},
 		{
+			"name": "libgig",
+			"default-features": false
+		},
+		{
 			"name": "libogg",
 			"default-features": false
 		},

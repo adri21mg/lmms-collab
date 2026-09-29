@@ -4,7 +4,9 @@ if(LMMS_HAVE_GIG)
 	SET(CMAKE_AUTOUIC ON)
 
 	# Required for not crashing loading files with libgig
-	add_compile_options("-fexceptions")
+	if(NOT MSVC) # MSVC enables C++ exceptions by default (/EHsc)
+		add_compile_options("-fexceptions")
+	endif()
 
 	link_directories(${GIG_LIBRARY_DIRS})
 	link_libraries(${GIG_LIBRARIES})

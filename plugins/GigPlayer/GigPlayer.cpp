@@ -31,6 +31,7 @@
 #include "GigPlayer.h"
 
 #include <cstring>
+#include <vector>
 #include <QDebug>
 #include <QLayout>
 #include <QLabel>
@@ -530,7 +531,10 @@ void GigInstrument::loadSample( GigSample& sample, SampleFrame* sampleData, f_cn
 	}
 
 	unsigned long allocationsize = samples * sample.sample->FrameSize;
-	int8_t buffer[allocationsize];
+	// Not a variable-length array (MSVC has none); reused, so the audio thread rarely allocates
+	static thread_local std::vector<int8_t> bufferStorage;
+	if (bufferStorage.size() < allocationsize) { bufferStorage.resize(allocationsize); }
+	int8_t* buffer = bufferStorage.data();
 
 	// Load the sample in different ways depending on if we're looping or not
 	if( loop == true && ( sample.pos >= loopStart || sample.pos + samples > loopStart ) )
@@ -575,14 +579,14 @@ void GigInstrument::loadSample( GigSample& sample, SampleFrame* sampleData, f_cn
 	{
 		sample.sample->SetPos( sample.pos );
 
-		unsigned long size = sample.sample->Read( &buffer, samples ) * sample.sample->FrameSize;
-		std::memset( (int8_t*) &buffer + size, 0, allocationsize - size );
+		unsigned long size = sample.sample->Read( buffer, samples ) * sample.sample->FrameSize;
+		std::memset( buffer + size, 0, allocationsize - size );
 	}
 
 	// Convert from 16 or 24 bit into 32-bit float
 	if( sample.sample->BitDepth == 24 ) // 24 bit
 	{
-		auto pInt = reinterpret_cast<uint8_t*>(&buffer);
+		auto pInt = reinterpret_cast<uint8_t*>(buffer);
 
 		for( f_cnt_t i = 0; i < samples; ++i )
 		{
@@ -614,7 +618,7 @@ void GigInstrument::loadSample( GigSample& sample, SampleFrame* sampleData, f_cn
 	}
 	else // 16 bit
 	{
-		auto pInt = reinterpret_cast<int16_t*>(&buffer);
+		auto pInt = reinterpret_cast<int16_t*>(buffer);
 
 		for( f_cnt_t i = 0; i < samples; ++i )
 		{
