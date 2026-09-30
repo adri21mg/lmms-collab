@@ -25,7 +25,10 @@
 #include "CollabProtocol.h"
 
 #include <algorithm>
+#include <cmath>
 #include <tuple>
+
+#include <QJsonArray>
 
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -235,6 +238,48 @@ bool isValidParamPath(const QString& path)
 }
 
 
+bool isValidParamRef(const QJsonValue& owner, const QJsonValue& path)
+{
+	if (!owner.isString() || !path.isString()) { return false; }
+	if (owner.toString() == SongOwner)
+	{
+		const auto& params = songParams();
+		return std::any_of(params.begin(), params.end(), [&](const SongParam& p) { return path.toString() == p.path; });
+	}
+	return parseId(owner) != 0 && isValidParamPath(path.toString());
+}
+
+
+bool validAutomationContent(const QJsonObject& op)
+{
+	constexpr int MaxNodes = 100000;
+	constexpr double MaxTicks = 1 << 30;
+	const double prog = op.value("prog").toDouble(-1);
+	if (!op.value("prog").isDouble() || (prog != 0 && prog != 1 && prog != 2)) { return false; }
+	if (!op.value("tens").isDouble() || !std::isfinite(op.value("tens").toDouble())) { return false; }
+	const QJsonArray nodes = op.value("nodes").toArray();
+	if (!op.value("nodes").isArray() || nodes.size() > MaxNodes) { return false; }
+	for (const QJsonValue& n : nodes)
+	{
+		const QJsonArray node = n.toArray();
+		if (node.size() != 6) { return false; }
+		for (const QJsonValue& v : node)
+		{
+			if (!v.isDouble() || !std::isfinite(v.toDouble())) { return false; }
+		}
+		const double pos = node[0].toDouble();
+		if (pos < 0 || pos > MaxTicks || pos != std::floor(pos)) { return false; }
+	}
+	const QJsonArray objects = op.value("objects").toArray();
+	if (!op.value("objects").isArray() || objects.size() > 1000) { return false; }
+	for (const QJsonValue& o : objects)
+	{
+		if (!isValidParamRef(o.toObject().value("owner"), o.toObject().value("path"))) { return false; }
+	}
+	return true;
+}
+
+
 std::optional<QString> validColor(const QJsonValue& value)
 {
 	static const QRegularExpression re{"^#[0-9a-fA-F]{6}$"};
@@ -246,7 +291,7 @@ std::optional<QString> validColor(const QJsonValue& value)
 std::optional<QJsonObject> sanitizePresence(const QJsonObject& message)
 {
 	static const QRegularExpression windowRe{
-		"^(song|mixer|notes|controllers|(pattern|pianoroll|instrument):[0-9a-f]{16}|effect:[0-9a-f]{16}:[0-9]{1,3})$"};
+		"^(song|mixer|notes|controllers|(pattern|pianoroll|instrument|automation):[0-9a-f]{16}|effect:[0-9a-f]{16}:[0-9]{1,3})$"};
 	static const QRegularExpression anchorRe{"^((track|head):[0-9a-f]{16}|(chan|fx):[0-9]{1,5})$"};
 	static const QRegularExpression idRe{"^[0-9a-f]{16}$"};
 	constexpr double MaxTicks = 1 << 30;

@@ -85,6 +85,14 @@ public:
 		return m_clip != nullptr;
 	}
 
+	//! Widget position of a time and a value, given as a fraction of the automated range (for showing
+	//! collaborators' cursors)
+	QPoint pointOfTickFraction(int tick, float fraction) const;
+	//! Time and value (as a fraction of the automated range) at a widget position
+	std::pair<int, float> tickFractionAt(const QPoint& point) const;
+	//! Visible area of the value grid, in widget coordinates
+	QRect valueGridRect() const;
+
 	void saveSettings(QDomDocument & doc, QDomElement & parent) override;
 	void loadSettings(const QDomElement & parent) override;
 	QString nodeName() const override
@@ -328,6 +336,8 @@ public:
 	void setGhostSample(SampleClip* newSample) { m_editor->setGhostSample(newSample); };
 
 	const AutomationClip* currentClip();
+	//! Shows the current clip's curve type and tension again (e.g. after a collaborator changed them)
+	void updateClipSettings();
 
 	void dropEvent( QDropEvent * _de ) override;
 	void dragEnterEvent( QDragEnterEvent * _dee ) override;

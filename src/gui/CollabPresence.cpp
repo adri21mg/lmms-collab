@@ -40,6 +40,8 @@
 #include <QToolButton>
 
 #include "CollabId.h"
+#include "AutomationClip.h"
+#include "AutomationEditor.h"
 #include "CollabSession.h"
 #include "ConfigManager.h"
 #include "ControllerRackView.h"
@@ -155,6 +157,7 @@ int xOfTick(const TrackContainerView* editor, int tick)
 QRect shownRect(QWidget* widget, QWidget* content)
 {
 	// Clip by every ancestor up to the window: that is what scroll areas and small windows do
+	if (widget == content) { return content->rect(); } // (its ancestors are outside the window)
 	QRect rect{widget->mapTo(content, QPoint{0, 0}), widget->size()};
 	for (QWidget* w = widget->parentWidget(); w && w != content; w = w->parentWidget())
 	{
@@ -555,6 +558,11 @@ QString CollabPresence::windowKeyOf(QWidget* content)
 		const MidiClip* clip = gui->pianoRoll()->currentMidiClip();
 		return clip ? key("pianoroll", clip->collabId()) : QString{};
 	}
+	if (content == gui->automationEditor())
+	{
+		const AutomationClip* clip = gui->automationEditor()->currentClip();
+		return clip ? key("automation", clip->collabId()) : QString{};
+	}
 	if (auto window = dynamic_cast<InstrumentTrackWindow*>(content)) { return key("instrument", window->model()->collabId()); }
 	if (auto dialog = dynamic_cast<EffectControlDialog*>(content))
 	{
@@ -616,6 +624,19 @@ QJsonObject CollabPresence::localCursor() const
 			const auto [tick, key] = editor->tickKeyAt(p);
 			cursor.insert("tick", tick);
 			cursor.insert("key", std::clamp(key, 0, 200));
+			return cursor;
+		}
+	}
+	else if (content == getGUI()->automationEditor())
+	{
+		// Time and value (as a fraction of the automated range), whatever each user's zoom and scroll
+		AutomationEditor* editor = getGUI()->automationEditor()->m_editor;
+		const QPoint p = editor->mapFromGlobal(global);
+		if (ancestor<AutomationEditor>(widget) == editor && editor->valueGridRect().contains(p))
+		{
+			const auto [tick, fraction] = editor->tickFractionAt(p);
+			cursor.insert("tick", tick);
+			cursor.insert("y", std::clamp(static_cast<double>(fraction), 0.0, 1.0));
 			return cursor;
 		}
 	}
@@ -742,6 +763,12 @@ std::optional<QPoint> CollabPresence::locate(QWidget* content, const QJsonObject
 		PianoRoll* editor = getGUI()->pianoRoll()->editor();
 		return editor->mapTo(content, editor->pointOfTickKey(cursor.value("tick").toInt(), cursor.value("key").toInt()));
 	}
+	if (content == getGUI()->automationEditor() && cursor.contains("tick"))
+	{
+		AutomationEditor* editor = getGUI()->automationEditor()->m_editor;
+		return editor->mapTo(content,
+			editor->pointOfTickFraction(cursor.value("tick").toInt(), static_cast<float>(cursor.value("y").toDouble())));
+	}
 	if (auto window = dynamic_cast<InstrumentTrackWindow*>(content))
 	{
 		// Over another tab of the instrument window, the position means nothing here (see tabHint())
@@ -794,6 +821,12 @@ QRect CollabPresence::visibleRect(QWidget* content, const QJsonObject& cursor) c
 	{
 		PianoRoll* editor = getGUI()->pianoRoll()->editor();
 		const QRect grid = editor->noteGridRect();
+		return QRect{editor->mapTo(content, grid.topLeft()), grid.size()}.intersected(content->rect());
+	}
+	if (content == getGUI()->automationEditor() && cursor.contains("tick"))
+	{
+		AutomationEditor* editor = getGUI()->automationEditor()->m_editor;
+		const QRect grid = editor->valueGridRect();
 		return QRect{editor->mapTo(content, grid.topLeft()), grid.size()}.intersected(content->rect());
 	}
 	return content->rect();
@@ -886,6 +919,13 @@ QString CollabPresence::describeWindow(const QString& window)
 		const Track* t = trackById(id);
 		return t ? tr("Pattern Editor: %1").arg(t->name()) : tr("Pattern Editor");
 	}
+	if (window.startsWith("automation:"))
+	{
+		const Clip* c = clipById(id);
+		if (!c) { return tr("Automation Editor"); }
+		const QString clipName = c->name().isEmpty() ? tr("clip") : c->name();
+		return tr("Automation Editor: %1 (%2)").arg(clipName, c->getTrack()->name());
+	}
 	if (window.startsWith("pianoroll:"))
 	{
 		const Clip* c = clipById(id);
@@ -934,6 +974,14 @@ void CollabPresence::goTo(const QString& clientId)
 		{
 			gui->pianoRoll()->setCurrentMidiClip(clip);
 			bringToFront(m_mainWindow, gui->pianoRoll());
+		}
+	}
+	else if (window.startsWith("automation:"))
+	{
+		if (auto clip = dynamic_cast<AutomationClip*>(clipById(id)))
+		{
+			gui->automationEditor()->setCurrentClip(clip);
+			bringToFront(m_mainWindow, gui->automationEditor());
 		}
 	}
 	else if (window.startsWith("effect:"))

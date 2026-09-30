@@ -47,6 +47,7 @@ const QStringList WindowStateElements = {"trackcontainer", "instrumenttrack", "s
 constexpr int InstrumentTrack = 0;
 constexpr int PatternTrack = 1;
 constexpr int SampleTrack = 2;
+constexpr int AutomationTrack = 5;
 
 QString clipTagFor(int trackType)
 {
@@ -55,6 +56,7 @@ QString clipTagFor(int trackType)
 	case InstrumentTrack: return "midiclip";
 	case PatternTrack: return "patternclip";
 	case SampleTrack: return "sampleclip";
+	case AutomationTrack: return "automationclip";
 	default: return {};
 	}
 }
@@ -66,7 +68,7 @@ bool isClipTag(const QString& tag)
 
 bool isContentTrackType(int type)
 {
-	return type == InstrumentTrack || type == SampleTrack;
+	return type == InstrumentTrack || type == SampleTrack || type == AutomationTrack;
 }
 
 using proto::NoteValues;
@@ -384,6 +386,7 @@ bool ProjectState::apply(const QJsonObject& op)
 	if (type == proto::op::NotesSet) { return applyNotesOp(op); }
 	if (type == proto::op::ParamSet) { return applyParamOp(op); }
 	if (type.startsWith("mixer.")) { return applyMixerOp(type, op); }
+	if (type == proto::op::AutomationSet) { return applyAutomationOp(op); }
 	if (type == proto::op::EffectsSet && op.contains("channel"))
 	{
 		// A mixer channel's effects: relayed, stored with the mixer.state that comes with them
@@ -538,7 +541,7 @@ bool ProjectState::applyTrackOp(const QString& type, const QJsonObject& op)
 
 	if (type == proto::op::TrackRemove)
 	{
-		// Pattern tracks are removed with pattern.remove, automation tracks are not shared yet
+		// Pattern tracks are removed with pattern.remove
 		if (!isContentTrackType(track.attribute("type").toInt())) { return false; }
 		removeTrackElement(trackId);
 		return true;
@@ -632,7 +635,6 @@ bool ProjectState::applyClipOp(const QString& type, const QJsonObject& op)
 	const bool inPatternEditor = m_patternEditorTracks.contains(trackId);
 	if (!m_songTracks.contains(trackId) && !inPatternEditor) { return false; }
 	QDomElement clip = m_clips.value(clipId);
-	if (clip.tagName() == "automationclip") { return false; }
 
 	if (type == proto::op::ClipRemove)
 	{
@@ -649,6 +651,12 @@ bool ProjectState::applyClipOp(const QString& type, const QJsonObject& op)
 		if (values.contains("steps") && clip.tagName() != "midiclip") { return false; }
 		if (values.contains("pos") && inPatternEditor) { return false; } // the position is the pattern
 		setFields(clip, values, proto::clipFields());
+		if (clip.tagName() == "automationclip" && values.contains("muted"))
+		{
+			// LMMS calls it "mute" in automation clips
+			clip.setAttribute("mute", clip.attribute("muted"));
+			clip.removeAttribute("muted");
+		}
 		return true;
 	}
 	return false;
@@ -842,6 +850,46 @@ bool ProjectState::applyMixerOp(const QString& type, const QJsonObject& op)
 		return isChannel(from) && isChannel(to) && from != to && from != master && op.value("on").isBool();
 	}
 	return false;
+}
+
+
+bool ProjectState::applyAutomationOp(const QJsonObject& op)
+{
+	// The whole content of an automation clip, written as LMMS saves it (automated parameters by owner
+	// and path: journal ids mean nothing across clients)
+	const Id clipId = proto::parseId(op.value("clip"));
+	QDomElement clip = m_clips.value(clipId);
+	if (clip.isNull() || clip.tagName() != "automationclip" || !proto::validAutomationContent(op)) { return false; }
+
+	for (QDomElement e = clip.firstChildElement(); !e.isNull();)
+	{
+		const QDomElement next = e.nextSiblingElement();
+		if (e.tagName() == "time" || e.tagName() == "object") { clip.removeChild(e); }
+		e = next;
+	}
+	auto number = [](const QJsonValue& v) { return QString::number(v.toDouble(), 'g', 9); };
+	clip.setAttribute("prog", op.value("prog").toInt());
+	clip.setAttribute("tens", number(op.value("tens")));
+	for (const QJsonValue& value : op.value("nodes").toArray())
+	{
+		const QJsonArray node = value.toArray();
+		QDomElement time = m_doc.createElement("time");
+		time.setAttribute("pos", node[0].toInt());
+		time.setAttribute("value", number(node[1]));
+		time.setAttribute("outValue", number(node[2]));
+		time.setAttribute("inTan", number(node[3]));
+		time.setAttribute("outTan", number(node[4]));
+		time.setAttribute("lockedTan", node[5].toInt() != 0 ? 1 : 0);
+		clip.appendChild(time);
+	}
+	for (const QJsonValue& value : op.value("objects").toArray())
+	{
+		QDomElement object = m_doc.createElement("object");
+		object.setAttribute("owner", value.toObject().value("owner").toString());
+		object.setAttribute("path", value.toObject().value("path").toString());
+		clip.appendChild(object);
+	}
+	return true;
 }
 
 

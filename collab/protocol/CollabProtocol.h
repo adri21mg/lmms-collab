@@ -78,6 +78,12 @@
 //     {op:"mixer.send",   from, to, on}                            a send between two channels appears/disappears
 //     param.set with a channel as owner: path "c:0" = volume, "s:<channelId>" = amount sent to that channel,
 //     "fx:<n>" = parameters of the channel's effects
+//     Automation (milestone M5b). Automation tracks and clips use track.* and clip.* like the others.
+//     {op:"automation.set", clip, prog, tens, nodes:[[pos, value, outValue, inTan, outTan, lockedTan]...],
+//         objects:[{owner, path}...]}                              the whole content of an automation clip:
+//         curve type (0 discrete, 1 linear, 2 cubic hermite), tension, nodes, and the automated parameters,
+//         named like in param.set. In XML, <object> elements carry the same as "owner" / "path" attributes
+//         (LMMS' own "id" differs on every client)
 // Tracks live in the "song" container (Song Editor) or the "patternstore" container (Pattern Editor).
 // Pattern N is the N-th pattern track in song order; its content is the N-th clip of every Pattern Editor
 // track, so reordering pattern tracks (track.order) also reorders those clips.
@@ -126,7 +132,8 @@ inline constexpr auto Error = "error";
  *   cursor: null (not over a shared window) or
  *     {w: window, a?: anchor, tick?, key?, x?, y?}
  *       w: "song" | "pattern:<patternTrackId>" | "pianoroll:<clipId>" | "instrument:<trackId>"
- *          | "mixer" | "notes" | "controllers" | "effect:<trackId>:<n>" (n-th effect of the track)
+ *          | "mixer" | "notes" | "controllers" | "effect:<ownerId>:<n>" (n-th effect of a track or mixer channel)
+ *          | "automation:<clipId>" (Automation Editor: tick, y = value as a fraction of the automated range)
  *       a: "track:<trackId>" (tick = time, y = 0..1 within the track row),
  *          "head:<trackId>" (x, y = pixels within the track's header),
  *          "chan:<n>" (x, y = pixels within mixer channel n), "fx:<n>" (pixels within the effects of channel n);
@@ -169,6 +176,7 @@ inline constexpr auto MixerOrder = "mixer.order";
 inline constexpr auto MixerSet = "mixer.set";
 inline constexpr auto MixerSend = "mixer.send";
 inline constexpr auto MixerState = "mixer.state";
+inline constexpr auto AutomationSet = "automation.set";
 } // namespace op
 
 //! Id of the mixer channel at @p index in a project saved without mixer channel ids.
@@ -193,6 +201,10 @@ const std::vector<SongParam>& songParams();
 
 //! "t:<n>", "i:<n>", "mt:<n>", "fx:<n>" (tracks), "c:0", "s:<channelId>" (mixer channels)
 bool isValidParamPath(const QString& path);
+//! A parameter's owner and path as in param.set (song-wide parameters: owner "song", path from songParams())
+bool isValidParamRef(const QJsonValue& owner, const QJsonValue& path);
+//! Checks the fields of automation.set (not the clip itself)
+bool validAutomationContent(const QJsonObject& op);
 
 //! Track containers: the Song Editor and the Pattern Editor
 inline constexpr auto SongContainer = "song";

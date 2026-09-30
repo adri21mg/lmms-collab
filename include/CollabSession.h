@@ -31,6 +31,7 @@
 #include <optional>
 
 #include <QHash>
+#include <QDomElement>
 #include <QJsonArray>
 #include <QElapsedTimer>
 #include <QFile>
@@ -52,6 +53,7 @@ namespace lmms
 {
 
 class AutomatableModel;
+class AutomationClip;
 class Clip;
 class Effect;
 class EffectChain;
@@ -179,11 +181,12 @@ private:
 		QHash<collab_id_t, ChannelInfo> channelInfo;
 	};
 
-	enum class Kind { Track, Clip, Note, Param };
+	enum class Kind { Track, Clip, Note, Param, Automation };
 	struct ObjectKey
 	{
 		Kind kind;
-		collab_id_t parent; //!< clip of a note, track of a clip, track of a parameter (0: song), 0 for tracks
+		collab_id_t parent; //!< clip of a note or automation, track of a clip, owner of a parameter (0: song),
+		                    //!< 0 for tracks
 		collab_id_t id;
 		QString path = {};  //!< parameter path (see proto::op::ParamSet)
 		friend bool operator==(const ObjectKey&, const ObjectKey&) = default;
@@ -272,6 +275,23 @@ private:
 	void addRemotePattern(const QJsonObject& op);
 	//! Project notes currently shown, if there is a GUI
 	static std::optional<QString> currentNotes();
+
+	// Automation (milestone M5b)
+	//! Nodes, curve and automated parameters of an automation clip (parameters as owner + path, see
+	//! proto::op::AutomationSet), as sent in automation.set
+	QJsonObject automationContent(const AutomationClip* clip) const;
+	//! The same as one comparable string (a hidden structure field of automation clips)
+	QString automationSignature(const AutomationClip* clip) const;
+	void applyAutomationContent(AutomationClip* clip, const QJsonObject& content);
+	//! Adds owner + path to the <object> elements of automation clips in @p root (LMMS saves journal ids,
+	//! which are different on every client), and removes those ids
+	static void annotateAutomation(QDomElement root);
+	//! Connects the automation clips found in @p root to the parameters named by owner + path
+	void resolveAutomation(const QDomElement& root);
+	//! Sets the automated parameters of a clip; parameters that do not exist yet (e.g. of a track that
+	//! arrives later) are tried again after the next transaction
+	void setAutomationObjects(AutomationClip* clip, const QJsonArray& objects);
+	void retryAutomationObjects();
 
 	// Mixer (milestone M5a)
 	//! Adds the mixer's channels, their fields and sends to @p s
@@ -386,6 +406,7 @@ private:
 	};
 	QHash<collab_id_t, PluginState> m_plugins;
 	QJsonArray m_pluginOps; //!< effects.set of the current flushPlugins(), before the states that store them
+	QHash<collab_id_t, QJsonArray> m_unresolvedAutomation; //!< automated parameters not found yet, per clip
 	QSet<collab_id_t> m_editedTracks;  //!< tracks with open plugin windows at the last check
 	QSet<collab_id_t> m_externalGuiTracks; //!< edited tracks whose plugins have a window of their own
 	QElapsedTimer m_opaqueCheck;

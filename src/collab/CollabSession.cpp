@@ -33,6 +33,8 @@
 #include <QFile>
 #include <QGuiApplication>
 #include <QJsonDocument>
+#include <QMdiArea>
+#include <QMdiSubWindow>
 #include <QPointer>
 #include <QTime>
 #include <QTcpSocket>
@@ -46,6 +48,7 @@
 #include "Engine.h"
 #include "GuiApplication.h"
 #include "InstrumentTrack.h"
+#include "MainWindow.h"
 #include "Mixer.h"
 #include "MidiClip.h"
 #include "Note.h"
@@ -324,11 +327,14 @@ void CollabSession::handleMessage(const QJsonObject& message)
 		QTemporaryDir dir;
 		const QString file = dir.filePath("share.mmp");
 		QFile f{file};
-		if (!dir.isValid() || !Engine::getSong()->saveProjectFile(file) || !f.open(QIODevice::ReadOnly))
+		QDomDocument doc;
+		if (!dir.isValid() || !Engine::getSong()->saveProjectFile(file) || !f.open(QIODevice::ReadOnly)
+			|| !doc.setContent(&f))
 		{
 			return fail(tr("Could not serialize the current song."));
 		}
-		send({{"t", proto::msg::Create}, {"project", m_project}, {"mmp", QString::fromUtf8(f.readAll())}});
+		annotateAutomation(doc.documentElement()); // automated parameters by name, not by journal id
+		send({{"t", proto::msg::Create}, {"project", m_project}, {"mmp", doc.toString(1)}});
 	}
 	else if (t == proto::msg::Joined) { handleJoined(message); }
 	else if (t == proto::msg::Tx)
@@ -373,11 +379,51 @@ void CollabSession::handleJoined(const QJsonObject& message)
 			return fail(tr("Could not write %1").arg(file));
 		}
 		f.close();
+		// Window sizes and positions are private (decision D9), so the shared project has none: keep this
+		// user's windows as they are instead of LMMS' defaults
+		struct WindowState
+		{
+			QPointer<QWidget> content;
+			QRect geometry;
+			bool visible;
+			bool maximized;
+		};
+		std::vector<WindowState> windows;
+		auto gui = gui::getGUI();
+		if (gui && gui->mainWindow())
+		{
+			for (QMdiSubWindow* w : gui->mainWindow()->workspace()->subWindowList())
+			{
+				windows.push_back({w->widget(), w->geometry(), w->isVisible(), w->isMaximized()});
+			}
+		}
 		m_loadingSnapshot = true;
 		Engine::getSong()->loadProject(file);
 		m_loadingSnapshot = false;
+		for (const WindowState& state : windows)
+		{
+			auto w = state.content ? qobject_cast<QMdiSubWindow*>(state.content->parentWidget()) : nullptr;
+			if (!w) { continue; } // e.g. an instrument window of the previous song
+			if (state.maximized) { w->showMaximized(); }
+			else
+			{
+				w->showNormal();
+				w->setGeometry(state.geometry);
+			}
+			w->setVisible(state.visible);
+		}
 	}
 	startTracking();
+	if (message.contains("mmp"))
+	{
+		// LMMS connects automation clips to parameters by journal ids, which only its own saves share
+		QDomDocument doc;
+		if (doc.setContent(message.value("mmp").toString()))
+		{
+			resolveAutomation(doc.documentElement());
+			m_structure = currentStructure(); // the automation clips' content as it is now
+		}
+	}
 	setState(State::Live);
 }
 
@@ -404,6 +450,7 @@ void CollabSession::startTracking()
 	m_structureTimer->start(StructureIntervalMs);
 	refreshParamIndex();
 	flushParams(); // takes the current values as baseline
+	m_structure = currentStructure(); // automation clips name their parameters through the index
 	m_trackStateTimer->start(250);
 
 	// Loading another project replaces every shared object: the session cannot continue
@@ -545,6 +592,8 @@ void CollabSession::applyTx(const QJsonObject& message)
 	if (structureChanged)
 	{
 		refreshParamIndex(); // tracks may have come or gone
+		retryAutomationObjects(); // automated parameters of tracks that arrived in this transaction
+		m_structure = currentStructure();
 		Engine::getSong()->setModified();
 	}
 	Engine::projectJournal()->setJournalling(journalling);
@@ -769,9 +818,9 @@ void CollabSession::writeNote(MidiClip* clip, collab_id_t id, const std::optiona
 
 bool CollabSession::syncsStructure(int trackType, bool inPatternEditor)
 {
-	// Tracks that can be created and removed by collaborators (automation comes later)
+	// Tracks that can be created and removed by collaborators
 	const bool content = trackType == static_cast<int>(Track::Type::Instrument)
-		|| trackType == static_cast<int>(Track::Type::Sample);
+		|| trackType == static_cast<int>(Track::Type::Sample) || trackType == static_cast<int>(Track::Type::Automation);
 	return inPatternEditor ? content : content || trackType == static_cast<int>(Track::Type::Pattern);
 }
 
@@ -879,6 +928,7 @@ QString CollabSession::serialize(Track* track)
 			p.removeChild(c);
 		}
 	}
+	annotateAutomation(element);
 	const bool muted = sharedMute(track);
 	element.setAttribute("solo", 0);
 	element.setAttribute("muted", muted ? 1 : 0);
@@ -893,6 +943,7 @@ QString CollabSession::serialize(Clip* clip)
 	QDomElement parent = doc.createElement("collab");
 	doc.appendChild(parent);
 	clip->saveState(doc, parent);
+	annotateAutomation(parent.firstChildElement());
 	return elementToString(parent.firstChildElement());
 }
 
@@ -901,9 +952,13 @@ Clip* CollabSession::createClipFromXml(Track* track, const QString& xml)
 {
 	QDomDocument doc;
 	if (!doc.setContent(xml)) { return nullptr; }
-	auto guard = Engine::audioEngine()->requestChangesGuard();
-	Clip* clip = track->createClip(TimePos{0});
-	clip->restoreState(doc.documentElement());
+	Clip* clip = nullptr;
+	{
+		auto guard = Engine::audioEngine()->requestChangesGuard();
+		clip = track->createClip(TimePos{0});
+		clip->restoreState(doc.documentElement());
+	}
+	instance()->resolveAutomation(doc.documentElement());
 	return clip;
 }
 
@@ -929,6 +984,18 @@ gui::TrackView* viewOf(gui::TrackContainerView* editor, const Track* track)
 		if (view->getTrack() == track) { return view; }
 	}
 	return nullptr;
+}
+
+//! LMMS creates the view of a new track later (queued signal). Operations that follow in the same
+//! transaction (e.g. its position) need it now, and the editor's views in the same order as the tracks.
+void ensureViews(TrackContainer* container)
+{
+	auto editor = editorFor(container);
+	if (!editor) { return; }
+	for (Track* track : container->tracks())
+	{
+		if (!viewOf(editor, track)) { editor->createTrackView(track); }
+	}
 }
 
 } // namespace
@@ -960,6 +1027,7 @@ void CollabSession::removeClip(Clip* clip)
 
 void CollabSession::reorderTracks(TrackContainer* container, const QList<collab_id_t>& order)
 {
+	ensureViews(container);
 	auto indexOf = [container](const Track* t) {
 		const auto& tracks = container->tracks();
 		return static_cast<int>(std::find(tracks.begin(), tracks.end(), t) - tracks.begin());
@@ -987,11 +1055,14 @@ void CollabSession::reorderTracks(TrackContainer* container, const QList<collab_
 	for (Track* t : wanted) { positions.push_back(indexOf(t)); }
 	std::sort(positions.begin(), positions.end());
 
-	for (std::size_t k = 0; k < wanted.size(); ++k)
+	// Every step moves a track by one; should views and tracks ever disagree, give up instead of hanging
+	int stepsLeft = static_cast<int>(container->tracks().size() * container->tracks().size()) + 16;
+	for (std::size_t k = 0; k < wanted.size() && stepsLeft > 0; ++k)
 	{
-		while (indexOf(wanted[k]) > positions[k]) { step(wanted[k], indexOf(wanted[k]) - 1); }
-		while (indexOf(wanted[k]) < positions[k]) { step(wanted[k], indexOf(wanted[k]) + 1); }
+		while (indexOf(wanted[k]) > positions[k] && stepsLeft-- > 0) { step(wanted[k], indexOf(wanted[k]) - 1); }
+		while (indexOf(wanted[k]) < positions[k] && stepsLeft-- > 0) { step(wanted[k], indexOf(wanted[k]) + 1); }
 	}
+	if (stepsLeft <= 0) { instance()->log("track order: views and tracks disagree, order not fully applied"); }
 }
 
 
@@ -1018,8 +1089,10 @@ CollabSession::Structure CollabSession::currentStructure() const
 			if (inPatternEditor) { s.patternEditorTracks.insert(id); }
 			for (const Clip* clip : track->getClips())
 			{
-				if (dynamic_cast<const AutomationClip*>(clip)) { continue; } // automation comes later
-				s.clips.insert(clip->collabId(), Structure::ClipInfo{id, clipFields(clip)});
+				QJsonObject fields = clipFields(clip);
+				// What an automation clip holds, compared as a whole (hidden field: never part of clip.set)
+				if (auto automation = dynamic_cast<const AutomationClip*>(clip)) { fields.insert("_a", automationSignature(automation)); }
+				s.clips.insert(clip->collabId(), Structure::ClipInfo{id, fields});
 			}
 		}
 	};
@@ -1100,6 +1173,19 @@ void CollabSession::flushStructure()
 				{"xml", serialize(findClip(clipId))}});
 			record(Kind::Clip, trackId, clipId, std::nullopt, clipState(clipId, it->fields));
 			continue;
+		}
+		if (it->fields.contains("_a") && old->fields.value("_a") != it->fields.value("_a"))
+		{
+			if (auto automation = dynamic_cast<AutomationClip*>(findClip(clipId)))
+			{
+				QJsonObject op = automationContent(automation);
+				op.insert("op", proto::op::AutomationSet);
+				op.insert("clip", proto::idString(clipId));
+				ops.append(op);
+				m_pendingStructure[pendingKey('a', clipId, "content")] = ctx;
+				record(Kind::Automation, clipId, clipId, QJsonObject{{"c", old->fields.value("_a")}},
+					QJsonObject{{"c", it->fields.value("_a")}});
+			}
 		}
 		const QJsonObject changed = changedFields(old->fields, it->fields);
 		if (changed.isEmpty()) { continue; }
@@ -1185,6 +1271,7 @@ void CollabSession::addRemotePattern(const QJsonObject& op)
 	const int shownPattern = Engine::patternStore()->currentPattern();
 	auto pattern = dynamic_cast<PatternTrack*>(Track::create(doc.documentElement(), Engine::getSong()));
 	if (!pattern) { return; }
+	ensureViews(Engine::getSong());
 	const auto index = static_cast<std::size_t>(pattern->patternIndex());
 
 	// The new pattern's clips were just created with local ids: take over the author's clips
@@ -1200,6 +1287,7 @@ void CollabSession::addRemotePattern(const QJsonObject& op)
 		const TimePos position = clip->startPosition(); // the position is the pattern here
 		clip->restoreState(clipDoc.documentElement());
 		clip->movePosition(position);
+		resolveAutomation(clipDoc.documentElement());
 	}
 	Engine::patternStore()->setCurrentPattern(shownPattern);
 	Engine::patternStore()->updateComboBox();
@@ -1233,7 +1321,16 @@ void CollabSession::applyRemoteStructureOp(const QJsonObject& op)
 			&& !findTrack(proto::parseId(doc.documentElement().attribute("cid"))))
 		{
 			Track::create(doc.documentElement(), container);
+			ensureViews(container);
+			resolveAutomation(doc.documentElement());
 		}
+	}
+	else if (type == proto::op::AutomationSet)
+	{
+		const collab_id_t id = proto::parseId(op.value("clip"));
+		auto clip = dynamic_cast<AutomationClip*>(findClip(id));
+		// our unacknowledged content wins
+		if (clip && !m_pendingStructure.contains(pendingKey('a', id, "content"))) { applyAutomationContent(clip, op); }
 	}
 	else if (type == proto::op::PatternAdd) { addRemotePattern(op); }
 	else if (type == proto::op::TrackRemove || type == proto::op::PatternRemove)
@@ -1389,6 +1486,7 @@ CollabSession::Gesture* CollabSession::openGestureFor(Kind kind, collab_id_t par
 		if (Gesture* g = find(Kind::Clip, id)) { return g; }
 		return find(Kind::Track, parent);
 	case Kind::Note:
+	case Kind::Automation:
 		if (Gesture* g = find(Kind::Clip, parent)) { return g; }
 		if (const Clip* clip = findClip(parent)) { return find(Kind::Track, clip->getTrack()->collabId()); }
 		return nullptr;
@@ -1439,7 +1537,14 @@ CollabSession::ObjectState CollabSession::currentState(const ObjectKey& key) con
 			{
 				fields.insert("_n", notesSignature(currentNotes(*midiClip)));
 			}
+			if (auto automation = dynamic_cast<const AutomationClip*>(clip)) { fields.insert("_a", automationSignature(automation)); }
 			return fields;
+		}
+		return std::nullopt;
+	case Kind::Automation:
+		if (auto automation = dynamic_cast<const AutomationClip*>(findClip(key.id)))
+		{
+			return QJsonObject{{"c", automationSignature(automation)}};
 		}
 		return std::nullopt;
 	case Kind::Note:
@@ -1470,7 +1575,7 @@ void CollabSession::replayGesture(Gesture& gesture, bool undo)
 	{
 		auto guard = Engine::audioEngine()->requestChangesGuard();
 		// Clips before notes: a note can only come back into a clip that exists
-		for (const Kind kind : {Kind::Param, Kind::Track, Kind::Clip, Kind::Note})
+		for (const Kind kind : {Kind::Param, Kind::Track, Kind::Clip, Kind::Automation, Kind::Note})
 		{
 			for (auto it = mineStates.cbegin(); it != mineStates.cend(); ++it)
 			{
@@ -1548,6 +1653,14 @@ void CollabSession::replayGesture(Gesture& gesture, bool undo)
 					}
 					else if (key.kind == Kind::Track) { applyTrackFields(findTrack(key.id), revert); }
 					else if (key.kind == Kind::Clip) { applyClipFields(findClip(key.id), revert); }
+					else if (key.kind == Kind::Automation)
+					{
+						if (auto automation = dynamic_cast<AutomationClip*>(findClip(key.id)))
+						{
+							applyAutomationContent(automation,
+								QJsonDocument::fromJson(revert.value("c").toString().toUtf8()).object());
+						}
+					}
 					else if (MidiClip* clip = findMidiClip(key.parent))
 					{
 						QJsonObject next = *current;

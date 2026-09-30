@@ -1424,6 +1424,41 @@ void AutomationEditor::paintEvent(QPaintEvent * pe )
 
 
 
+QPoint AutomationEditor::pointOfTickFraction(int tick, float fraction) const
+{
+	const int x = VALUES_WIDTH + (tick - m_currentPosition) * m_ppb / TimePos::ticksPerBar();
+	const float level = m_minLevel + fraction * (m_maxLevel - m_minLevel);
+	const int gridBottom = height() - SCROLLBAR_SIZE - 1;
+	const float y = m_y_auto ? gridBottom - (gridBottom - TOP_MARGIN) * fraction
+		: gridBottom - (level - m_bottomLevel) * m_y_delta;
+	return {x, static_cast<int>(y)};
+}
+
+
+
+
+std::pair<int, float> AutomationEditor::tickFractionAt(const QPoint& point) const
+{
+	const int tick = (point.x() - VALUES_WIDTH) * TimePos::ticksPerBar() / m_ppb + m_currentPosition;
+	const int gridBottom = height() - SCROLLBAR_SIZE - 1;
+	const float range = m_maxLevel - m_minLevel;
+	float fraction = 0;
+	if (m_y_auto) { fraction = (gridBottom - point.y()) / static_cast<float>(std::max(1, gridBottom - TOP_MARGIN)); }
+	else if (range > 0 && m_y_delta > 0) { fraction = (m_bottomLevel + (gridBottom - point.y()) / m_y_delta - m_minLevel) / range; }
+	return {tick, fraction};
+}
+
+
+
+
+QRect AutomationEditor::valueGridRect() const
+{
+	return QRect{QPoint{VALUES_WIDTH, TOP_MARGIN}, QPoint{width() - SCROLLBAR_SIZE - 1, height() - SCROLLBAR_SIZE - 1}};
+}
+
+
+
+
 int AutomationEditor::xCoordOfTick(int tick )
 {
 	return VALUES_WIDTH + ( ( tick - m_currentPosition )
@@ -2158,6 +2193,23 @@ AutomationEditorWindow::AutomationEditorWindow() :
 	setAcceptDrops( true );
 	m_toolBar->setAcceptDrops( true );
 }
+
+
+void AutomationEditorWindow::updateClipSettings()
+{
+	const AutomationClip* clip = m_editor->m_clip;
+	if (!clip) { return; }
+	m_editor->m_tensionModel->setValue(clip->getTension());
+	switch (clip->progressionType())
+	{
+	case AutomationClip::ProgressionType::Discrete: m_discreteAction->setChecked(true); break;
+	case AutomationClip::ProgressionType::Linear: m_linearAction->setChecked(true); break;
+	case AutomationClip::ProgressionType::CubicHermite: m_cubicHermiteAction->setChecked(true); break;
+	}
+	m_tensionKnob->setEnabled(clip->progressionType() == AutomationClip::ProgressionType::CubicHermite);
+}
+
+
 
 
 void AutomationEditorWindow::setCurrentClip(AutomationClip* clip)

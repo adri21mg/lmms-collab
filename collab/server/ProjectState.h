@@ -64,6 +64,7 @@ private:
 	bool applyNotesOp(const QJsonObject& op);
 	bool applyParamOp(const QJsonObject& op);
 	bool applyMixerOp(const QString& type, const QJsonObject& op);
+	bool applyAutomationOp(const QJsonObject& op);
 	//! Mixer channel ids by position, from the <mixer> element (ids added where missing)
 	void indexMixer();
 	//! Settings element of an instrument or sample track (it holds the "mixch" channel number)

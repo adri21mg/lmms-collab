@@ -985,6 +985,75 @@ private slots:
 		QCOMPARE(m_peer.nextForeignOp("mixer.remove").value("id").toString(), localId);
 	}
 
+	// ---- M5b: automation ----
+
+	void testAutomationSync()
+	{
+		m_peer.drain();
+		auto instrument = dynamic_cast<InstrumentTrack*>(m_clip->getTrack());
+		const QString instrumentId = proto::idString(instrument->collabId());
+		QString volumePath;
+		for (const QString& line : CollabSession::describeParams(instrument))
+		{
+			if (line.endsWith(" Volume") && line.startsWith("t:")) { volumePath = line.section(' ', 0, 0); break; }
+		}
+		QVERIFY(!volumePath.isEmpty());
+
+		// An automation track made here: the peer gets its clip with the automated parameter by name
+		auto track = Track::create(Track::Type::Automation, Engine::getSong());
+		auto clip = dynamic_cast<AutomationClip*>(track->createClip(TimePos{0}));
+		clip->addObject(instrument->volumeModel());
+		clip->putValue(TimePos{0}, 20, false);
+		const auto add = m_peer.nextForeignOp("track.add");
+		const QString xml = add.value("xml").toString();
+		QVERIFY2(xml.contains(QString{"owner=\"%1\""}.arg(instrumentId)) && xml.contains(QString{"path=\"%1\""}.arg(volumePath)),
+			qPrintable(xml));
+
+		// Drawing sends the whole content
+		m_peer.drain();
+		clip->putValue(TimePos{96}, 80, false);
+		emit clip->dataChanged();
+		const auto set = m_peer.nextForeignOp("automation.set");
+		QCOMPARE(set.value("clip").toString(), proto::idString(clip->collabId()));
+		QCOMPARE(set.value("nodes").toArray().size(), 2);
+		QCOMPARE(set.value("objects").toArray().first().toObject().value("path").toString(), volumePath);
+
+		// The peer's content: other nodes, now automating the tempo; not echoed
+		m_peer.sendOps({QJsonObject{{"op", "automation.set"}, {"clip", proto::idString(clip->collabId())},
+			{"prog", 1}, {"tens", 1}, {"nodes", QJsonArray{QJsonArray{0, 120, 120, 0, 0, 0}, QJsonArray{192, 140, 140, 0, 0, 0}}},
+			{"objects", QJsonArray{QJsonObject{{"owner", "song"}, {"path", "bpm"}}}}}});
+		QTRY_COMPARE(clip->getTimeMap().size(), 2);
+		QTRY_VERIFY(clip->getTimeMap().contains(192));
+		QCOMPARE(clip->objects().size(), std::size_t{1});
+		QCOMPARE(clip->firstObject(), static_cast<const AutomatableModel*>(&Engine::getSong()->tempoModel()));
+		QVERIFY2(m_peer.nextForeignOp("automation.set", 500).isEmpty(), "no echo of remote automation");
+
+		// An automation track made by the peer, automating our instrument's volume
+		const QString remoteTrack = "00000000000f0001", remoteClip = "00000000000f0002";
+		m_peer.sendOps({QJsonObject{{"op", "track.add"}, {"container", "song"}, {"index", -1},
+			{"xml", QString{R"(<track type="5" name="Auto" cid="%1" muted="0" solo="0"><automationtrack/>)"
+				R"(<automationclip cid="%2" pos="0" len="192" name="" prog="0" tens="1" mute="0">)"
+				R"(<time pos="0" value="50" outValue="50"/><object owner="%3" path="%4"/></automationclip></track>)"}
+				.arg(remoteTrack, remoteClip, instrumentId, volumePath)}}});
+		QTRY_VERIFY(findTrack(idFromString(remoteTrack)) != nullptr);
+		auto remote = dynamic_cast<AutomationClip*>(findTrack(idFromString(remoteTrack))->getClips().front());
+		QCOMPARE(remote->firstObject(), static_cast<const AutomatableModel*>(instrument->volumeModel()));
+
+		// Ctrl+Z of my own drawing restores my content and sends it
+		auto journal = Engine::projectJournal();
+		journal->setJournalling(true);
+		m_peer.drain();
+		clip->addJournalCheckPoint();
+		clip->putValue(TimePos{384}, 150, false);
+		emit clip->dataChanged();
+		QVERIFY(!m_peer.nextForeignOp("automation.set").isEmpty());
+		journal->undo();
+		QTRY_VERIFY(!clip->getTimeMap().contains(384));
+		QVERIFY(clip->getTimeMap().contains(192));
+		QVERIFY(!m_peer.nextForeignOp("automation.set").isEmpty());
+		journal->setJournalling(false);
+	}
+
 private:
 	QString m_newTrackXml;
 
