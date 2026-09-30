@@ -233,7 +233,7 @@ const std::vector<SongParam>& songParams()
 
 bool isValidParamPath(const QString& path)
 {
-	static const QRegularExpression re{"^((t|i|mt|fx):[0-9]{1,5}|c:0|s:[0-9a-f]{16})$"};
+	static const QRegularExpression re{"^((t|i|mt|fx|k):[0-9]{1,5}|c:0|s:[0-9a-f]{16})$"};
 	return re.match(path).hasMatch();
 }
 
@@ -247,6 +247,13 @@ bool isValidParamRef(const QJsonValue& owner, const QJsonValue& path)
 		return std::any_of(params.begin(), params.end(), [&](const SongParam& p) { return path.toString() == p.path; });
 	}
 	return parseId(owner) != 0 && isValidParamPath(path.toString());
+}
+
+
+bool isValidControllerRef(const QJsonValue& value)
+{
+	static const QRegularExpression re{"^([0-9a-f]{16}|p:[0-9a-f]{16}:[0-9]{1,3})?$"};
+	return value.isString() && re.match(value.toString()).hasMatch();
 }
 
 
@@ -291,7 +298,7 @@ std::optional<QString> validColor(const QJsonValue& value)
 std::optional<QJsonObject> sanitizePresence(const QJsonObject& message)
 {
 	static const QRegularExpression windowRe{
-		"^(song|mixer|notes|controllers|(pattern|pianoroll|instrument|automation):[0-9a-f]{16}|effect:[0-9a-f]{16}:[0-9]{1,3})$"};
+		"^(song|toolbar|mixer|notes|controllers|(pattern|pianoroll|instrument|automation|controller):[0-9a-f]{16}|effect:[0-9a-f]{16}:[0-9]{1,3})$"};
 	static const QRegularExpression anchorRe{"^((track|head):[0-9a-f]{16}|(chan|fx):[0-9]{1,5})$"};
 	static const QRegularExpression idRe{"^[0-9a-f]{16}$"};
 	constexpr double MaxTicks = 1 << 30;

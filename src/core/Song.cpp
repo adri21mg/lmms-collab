@@ -1320,6 +1320,8 @@ void Song::restoreControllerStates( const QDomElement & element )
 	while( !node.isNull() && !isCancelled() )
 	{
 		Controller * c = Controller::create( node.toElement(), this );
+		// Projects saved without controller ids: ids from the position, the same on every client
+		if (c && c->collabId() == 0) { c->setCollabId(collab::defaultControllerId(static_cast<int>(m_controllers.size()))); }
 		if (c) {addController(c);}
 		else
 		{

@@ -61,8 +61,11 @@
 #include "MeterModel.h"
 #include "Microtuner.h"
 #include "MidiPort.h"
+#include "Controller.h"
+#include "ControllerConnection.h"
 #include "Mixer.h"
 #include "PatternStore.h"
+#include "PeakController.h"
 #include "PluginFactory.h"
 #include "SampleTrack.h"
 #include "Song.h"
@@ -379,6 +382,13 @@ void CollabSession::refreshParamIndex()
 		MixerChannel* channel = Engine::mixer()->mixerChannel(i);
 		if (m_structure.channelInfo.contains(channel->collabId())) { add(channel->collabId(), enumerateChannelParams(channel)); }
 	}
+	for (Controller* controller : Engine::getSong()->controllers())
+	{
+		if (m_structure.controllerFields.contains(controller->collabId()))
+		{
+			add(controller->collabId(), enumerateControllerParams(controller));
+		}
+	}
 	m_paramIndexAge.start();
 }
 
@@ -421,8 +431,23 @@ void CollabSession::flushParams()
 		for (const auto& [path, model] : index->byPath)
 		{
 			if (!model) { continue; }
-			const float value = model->value<float>();
 			const ParamKey key{owner, path};
+
+			// Which controller it follows
+			const QString link = sharedConnection(model);
+			const auto linkBase = m_linkBaseline.find(key);
+			if (linkBase == m_linkBaseline.end()) { m_linkBaseline.insert(key, link); }
+			else if (*linkBase != link && !m_unresolvedLinks.contains(key))
+			{
+				*linkBase = link;
+				ops.append(QJsonObject{{"op", proto::op::ParamLink},
+					{"owner", owner == 0 ? QString{proto::SongOwner} : proto::idString(owner)}, {"path", path},
+					{"controller", link}});
+				m_pendingLinks[key] = ctx;
+				if (owner != 0) { m_ctxParamTracks[ctx].insert(owner); } // its owner's settings are stored again
+			}
+
+			const float value = model->value<float>();
 			const auto base = m_paramBaseline.find(key);
 			if (base == m_paramBaseline.end())
 			{
@@ -436,7 +461,11 @@ void CollabSession::flushParams()
 			if (!std::isfinite(value)) { continue; }
 
 			if (!automated) { automated = automatedModels(); }
-			if (automated->contains(model.data()) || model->controllerConnection())
+			// A MIDI controller is this user's own device: what it does counts as done by hand
+			const ControllerConnection* connection = model->controllerConnection();
+			const bool midi = connection && const_cast<ControllerConnection*>(connection)->getController()
+				&& const_cast<ControllerConnection*>(connection)->getController()->type() == Controller::ControllerType::Midi;
+			if (automated->contains(model.data()) || (connection && !midi))
 			{
 				log(QString{"local %1 %2 = %3 not sent (automated or controlled)"}.arg(proto::idString(owner), path).arg(value));
 				continue; // not by hand
@@ -463,6 +492,10 @@ void CollabSession::paramsAcknowledged(qint64 ctx, qint64 seq)
 	for (auto it = m_pendingParams.begin(); it != m_pendingParams.end();)
 	{
 		it = it.value() <= ctx ? m_pendingParams.erase(it) : std::next(it);
+	}
+	for (auto it = m_pendingLinks.begin(); it != m_pendingLinks.end();)
+	{
+		it = it.value() <= ctx ? m_pendingLinks.erase(it) : std::next(it);
 	}
 	for (auto it = m_ctxParamTracks.begin(); it != m_ctxParamTracks.end();)
 	{
@@ -531,6 +564,7 @@ void CollabSession::sendTrackStates()
 	if (m_state != State::Live) { return; }
 	QJsonArray ops;
 	bool mixerState = false;
+	bool controllersState = false;
 	for (auto it = m_trackParams.begin(); it != m_trackParams.end(); ++it)
 	{
 		TrackParamState& state = it.value();
@@ -543,8 +577,10 @@ void CollabSession::sendTrackStates()
 				{"xml", settingsXml(track)}});
 		}
 		else if (findMixerChannel(it.key())) { mixerState = true; } // the server stores the whole mixer
+		else if (findController(proto::idString(it.key()))) { controllersState = true; } // the whole Controller Rack
 	}
 	if (mixerState) { ops.append(QJsonObject{{"op", proto::op::MixerState}, {"xml", mixerXml()}}); }
+	if (controllersState) { ops.append(QJsonObject{{"op", proto::op::ControllersState}, {"xml", controllersXml()}}); }
 	if (!ops.isEmpty()) { sendOps(ops); }
 }
 
@@ -558,6 +594,10 @@ void CollabSession::resetParamBaselines(collab_id_t owner, const QString& prefix
 	for (auto it = m_pendingParams.begin(); it != m_pendingParams.end();)
 	{
 		it = it.key().first == owner && it.key().second.startsWith(prefix) ? m_pendingParams.erase(it) : std::next(it);
+	}
+	for (auto it = m_linkBaseline.begin(); it != m_linkBaseline.end();)
+	{
+		it = it.key().first == owner && it.key().second.startsWith(prefix) ? m_linkBaseline.erase(it) : std::next(it);
 	}
 	m_paramIndexAge.invalidate(); // renumber at the next flush
 }
@@ -866,6 +906,11 @@ void CollabSession::applyRemoteEffects(const QJsonObject& op)
 			}
 			effect->setProperty(EffectIdProperty, id);
 			effect->setProperty("collabEffectIdShared", true);
+			// A Peak Controller effect keeps the id its controller is saved with (LMMS draws a new one)
+			for (QDomElement c = element.firstChildElement(); !c.isNull(); c = c.nextSiblingElement())
+			{
+				if (c.hasAttribute("effectId")) { PeakController::setEffectId(effect, c.attribute("effectId").toInt()); }
+			}
 			result.push_back(effect);
 		}
 

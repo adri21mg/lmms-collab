@@ -214,6 +214,27 @@ void ProjectState::index()
 	}
 	for (const QDomElement& track : childTracks(m_songContainer)) { indexTrack(track, true); }
 	indexMixer();
+	indexControllers();
+}
+
+
+void ProjectState::indexControllers()
+{
+	m_controllers.clear();
+	m_announcedControllers.clear();
+	int index = 0;
+	QDomElement controllers = m_doc.documentElement().firstChildElement("song").firstChildElement("controllers");
+	for (QDomElement c = controllers.firstChildElement(); !c.isNull(); c = c.nextSiblingElement(), ++index)
+	{
+		if (idOf(c) == 0) { c.setAttribute("cid", proto::idString(proto::defaultControllerId(index))); }
+		m_controllers.insert(idOf(c));
+	}
+}
+
+
+bool ProjectState::isParamOwner(Id id) const
+{
+	return m_songTracks.contains(id) || m_patternEditorTracks.contains(id) || isChannel(id) || isController(id);
 }
 
 
@@ -387,6 +408,7 @@ bool ProjectState::apply(const QJsonObject& op)
 	if (type == proto::op::ParamSet) { return applyParamOp(op); }
 	if (type.startsWith("mixer.")) { return applyMixerOp(type, op); }
 	if (type == proto::op::AutomationSet) { return applyAutomationOp(op); }
+	if (type.startsWith("controller") || type == proto::op::ParamLink) { return applyControllerOp(type, op); }
 	if (type == proto::op::EffectsSet && op.contains("channel"))
 	{
 		// A mixer channel's effects: relayed, stored with the mixer.state that comes with them
@@ -428,8 +450,7 @@ bool ProjectState::applyParamOp(const QJsonObject& op)
 
 	// Track and mixer channel parameters are only relayed; track.state / mixer.state store them
 	const Id owner = proto::parseId(op.value("owner"));
-	return (m_songTracks.contains(owner) || m_patternEditorTracks.contains(owner) || isChannel(owner))
-		&& proto::isValidParamPath(path);
+	return isParamOwner(owner) && proto::isValidParamPath(path);
 }
 
 
@@ -890,6 +911,58 @@ bool ProjectState::applyAutomationOp(const QJsonObject& op)
 		clip.appendChild(object);
 	}
 	return true;
+}
+
+
+bool ProjectState::applyControllerOp(const QString& type, const QJsonObject& op)
+{
+	const Id id = proto::parseId(op.value("id"));
+	if (type == proto::op::ControllersState)
+	{
+		// The whole Controller Rack; connections refer to controllers by their position in it
+		QDomDocument fragment;
+		if (!op.value("xml").isString() || !fragment.setContent(op.value("xml").toString())) { return false; }
+		const QDomElement controllers = fragment.documentElement();
+		if (controllers.tagName() != "controllers" || controllers.childNodes().size() > 1000) { return false; }
+		QDomElement song = m_doc.documentElement().firstChildElement("song");
+		QDomElement imported = m_doc.importNode(controllers, true).toElement();
+		const QDomElement old = song.firstChildElement("controllers");
+		if (old.isNull()) { song.appendChild(imported); }
+		else { song.replaceChild(imported, old); }
+		indexControllers();
+		return true;
+	}
+	if (type == proto::op::ControllerAdd)
+	{
+		QDomDocument fragment;
+		if (id == 0 || isController(id) || !op.value("xml").isString() || !fragment.setContent(op.value("xml").toString())
+			|| fragment.documentElement().tagName() != "lfocontroller")
+		{
+			return false;
+		}
+		m_announcedControllers.insert(id); // stored by the controllers.state that follows
+		return true;
+	}
+	if (type == proto::op::ControllerRemove) { return isController(id); }
+	if (type == proto::op::ControllerSet)
+	{
+		// An LFO by id, or a Peak Controller by its effect ("ref": "p:<owner>:<n>"); the rack is stored by
+		// the controllers.state that comes with it
+		const QJsonObject values = op.value("v").toObject();
+		static const std::vector<proto::FieldSpec> fields{{"name", proto::FieldSpec::Kind::String}};
+		const QString ref = op.value("ref").toString();
+		const bool known = ref.isEmpty() ? isController(id)
+			: ref.startsWith("p:") && proto::isValidControllerRef(op.value("ref"));
+		return known && !values.isEmpty() && proto::validFields(values, fields);
+	}
+	if (type == proto::op::ParamLink)
+	{
+		// Relayed; the connection is stored with the settings of the parameter's owner (track.state...)
+		const QJsonValue owner = op.value("owner");
+		return proto::isValidParamRef(owner, op.value("path")) && proto::isValidControllerRef(op.value("controller"))
+			&& (owner.toString() == proto::SongOwner || isParamOwner(proto::parseId(owner)));
+	}
+	return false;
 }
 
 

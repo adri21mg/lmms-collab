@@ -58,6 +58,13 @@ inline constexpr collab_id_t defaultMixerChannelId(int index)
 	return 0x4d49584300000000ull + static_cast<collab_id_t>(index); // "MIXC" + index
 }
 
+//! Id of the n-th controller (Controller Rack) in a project saved without controller ids; see above.
+//! Must match proto::defaultControllerId() in collab/protocol/CollabProtocol.h.
+inline constexpr collab_id_t defaultControllerId(int index)
+{
+	return 0x4354524c00000000ull + static_cast<collab_id_t>(index); // "CTRL" + index
+}
+
 //! Kinds of objects whose ids must be unique among all live objects of the project.
 //! (Note ids only need to be unique within their clip; MidiClip takes care of that.)
 enum class IdScope

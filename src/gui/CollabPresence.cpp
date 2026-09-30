@@ -43,6 +43,10 @@
 #include "AutomationClip.h"
 #include "AutomationEditor.h"
 #include "CollabSession.h"
+#include "Controller.h"
+#include "ControllerDialog.h"
+#include "ControllerRackView.h"
+#include "ControllerView.h"
 #include "ConfigManager.h"
 #include "ControllerRackView.h"
 #include "Effect.h"
@@ -97,9 +101,21 @@ T* ancestor(QWidget* widget)
 //! The widget shown inside the MDI sub window that contains @p widget
 QWidget* contentOf(QWidget* widget)
 {
+	QWidget* toolBar = getGUI() && getGUI()->mainWindow() ? getGUI()->mainWindow()->toolBar() : nullptr;
 	for (; widget; widget = widget->parentWidget())
 	{
-		if (qobject_cast<QMdiSubWindow*>(widget->parentWidget())) { return widget; }
+		if (widget == toolBar || qobject_cast<QMdiSubWindow*>(widget->parentWidget())) { return widget; }
+	}
+	return nullptr;
+}
+
+//! The window (Controls) of the controller named @p name, if it was ever opened
+ControllerDialog* controllerDialogOf(MainWindow* mainWindow, const QString& name)
+{
+	for (QMdiSubWindow* subWindow : mainWindow->workspace()->subWindowList())
+	{
+		auto dialog = dynamic_cast<ControllerDialog*>(subWindow->widget());
+		if (dialog && collab::controllerName(dynamic_cast<Controller*>(dialog->model())) == name) { return dialog; }
 	}
 	return nullptr;
 }
@@ -548,6 +564,13 @@ QString CollabPresence::windowKeyOf(QWidget* content)
 	if (!content || !gui) { return {}; }
 	auto key = [](const char* kind, collab_id_t id) { return QString{"%1:%2"}.arg(kind, collab::idToString(id)); };
 	if (content == gui->songEditor()) { return "song"; }
+	if (gui->mainWindow() && content == gui->mainWindow()->toolBar()) { return "toolbar"; }
+	if (auto dialog = dynamic_cast<ControllerDialog*>(content))
+	{
+		// The Controls window of an LFO (Peak Controllers are edited in their effect's window)
+		const QString name = collab::controllerName(dynamic_cast<Controller*>(dialog->model()));
+		return name.size() == 16 ? "controller:" + name : QString{};
+	}
 	if (content == gui->patternEditor())
 	{
 		const PatternTrack* pattern = currentPatternTrack();
@@ -890,10 +913,14 @@ std::optional<QRect> CollabPresence::mixerSelection(QWidget* content, const QJso
 void CollabPresence::updateOverlays()
 {
 	// One overlay per open window that can show collaborators; they only repaint what changed
+	std::vector<QWidget*> contents{m_mainWindow->toolBar()};
 	for (QMdiSubWindow* subWindow : m_mainWindow->workspace()->subWindowList())
 	{
-		QWidget* content = subWindow->widget();
-		if (!content || !subWindow->isVisible() || windowKeyOf(content).isEmpty()) { continue; }
+		if (subWindow->isVisible()) { contents.push_back(subWindow->widget()); }
+	}
+	for (QWidget* content : contents)
+	{
+		if (!content || windowKeyOf(content).isEmpty()) { continue; }
 		auto& overlay = m_overlays[content];
 		if (!overlay) { overlay = new CursorOverlay(this, content); }
 		if (overlay->geometry() != content->rect()) { overlay->setGeometry(content->rect()); }
@@ -911,6 +938,12 @@ QString CollabPresence::describeWindow(const QString& window)
 {
 	const collab_id_t id = collab::idFromString(idPart(window));
 	if (window == "song") { return tr("Song Editor"); }
+	if (window == "toolbar") { return tr("Main toolbar"); }
+	if (window.startsWith("controller:"))
+	{
+		const Controller* c = collab::findController(idPart(window));
+		return c ? tr("Controller: %1").arg(c->name()) : tr("Controller");
+	}
 	if (window == "mixer") { return tr("Mixer"); }
 	if (window == "notes") { return tr("Project Notes"); }
 	if (window == "controllers") { return tr("Controller Rack"); }
@@ -957,6 +990,21 @@ void CollabPresence::goTo(const QString& clientId)
 	auto gui = getGUI();
 
 	if (window == "song") { bringToFront(m_mainWindow, gui->songEditor()); }
+	else if (window.startsWith("controller:"))
+	{
+		// Its Controls window, opened like its button in the Controller Rack does
+		ControllerDialog* dialog = controllerDialogOf(m_mainWindow, idPart(window));
+		if (!dialog || !dialog->isVisible())
+		{
+			for (ControllerView* view : gui->getControllerRackView()->findChildren<ControllerView*>())
+			{
+				if (collab::controllerName(view->getController()) == idPart(window)) { view->editControls(); }
+			}
+			dialog = controllerDialogOf(m_mainWindow, idPart(window));
+		}
+		if (dialog) { bringToFront(m_mainWindow, dialog); }
+		else { bringToFront(m_mainWindow, gui->getControllerRackView()); }
+	}
 	else if (window == "mixer") { bringToFront(m_mainWindow, gui->mixerView()); }
 	else if (window == "notes") { bringToFront(m_mainWindow, gui->getProjectNotes()); }
 	else if (window == "controllers") { bringToFront(m_mainWindow, gui->getControllerRackView()); }

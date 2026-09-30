@@ -55,6 +55,7 @@ namespace lmms
 class AutomatableModel;
 class AutomationClip;
 class Clip;
+class Controller;
 class Effect;
 class EffectChain;
 class MidiClip;
@@ -179,6 +180,10 @@ private:
 		};
 		QList<collab_id_t> channels;              //!< mixer channels in order, the master first
 		QHash<collab_id_t, ChannelInfo> channelInfo;
+		QList<collab_id_t> controllers;           //!< LFO controllers of the Controller Rack, in order
+		QHash<collab_id_t, QJsonObject> controllerFields;
+		QStringList allControllers;               //!< every shared controller (also Peak Controllers), in order
+		QHash<QString, QString> peakNames;        //!< names of Peak Controllers (see controllerName())
 	};
 
 	enum class Kind { Track, Clip, Note, Param, Automation };
@@ -292,6 +297,24 @@ private:
 	//! arrives later) are tried again after the next transaction
 	void setAutomationObjects(AutomationClip* clip, const QJsonArray& objects);
 	void retryAutomationObjects();
+
+	// Controllers (milestone M5c)
+	static void addControllerStructure(Structure& s);
+	//! Appends the operations for Controller Rack changes (and a controllers.state if there are any)
+	void flushControllers(const Structure& current, QJsonArray& ops, qint64 ctx);
+	void applyRemoteControllerOp(const QJsonObject& op);
+	//! The whole <controllers>, as LMMS saves it
+	static QString controllersXml();
+	//! Parameters of a controller: "k:<n>", the n-th knob or button in its object tree
+	static std::vector<std::pair<QString, AutomatableModel*>> enumerateControllerParams(Controller* controller);
+	//! The shared controller connection of a parameter: a controller name (see proto::op::ParamLink) or ""
+	//! (none, or a MIDI controller: each user's own device)
+	static QString sharedConnection(const AutomatableModel* model);
+	void applyRemoteLink(const QJsonObject& op, qint64 seq);
+	//! Connects @p model to the controller named @p controller ("" disconnects); false if it does not exist here
+	static bool applyLink(AutomatableModel* model, const QString& controller);
+	//! Connections to controllers that did not exist yet (e.g. a Peak Controller effect that arrives later)
+	void retryLinks();
 
 	// Mixer (milestone M5a)
 	//! Adds the mixer's channels, their fields and sends to @p s
@@ -407,6 +430,9 @@ private:
 	QHash<collab_id_t, PluginState> m_plugins;
 	QJsonArray m_pluginOps; //!< effects.set of the current flushPlugins(), before the states that store them
 	QHash<collab_id_t, QJsonArray> m_unresolvedAutomation; //!< automated parameters not found yet, per clip
+	QHash<ParamKey, QString> m_linkBaseline;     //!< last synchronized controller connection of every parameter
+	QHash<ParamKey, qint64> m_pendingLinks;      //!< our unacknowledged connection changes (ctx)
+	QHash<ParamKey, QString> m_unresolvedLinks;  //!< connections to controllers not found yet
 	QSet<collab_id_t> m_editedTracks;  //!< tracks with open plugin windows at the last check
 	QSet<collab_id_t> m_externalGuiTracks; //!< edited tracks whose plugins have a window of their own
 	QElapsedTimer m_opaqueCheck;
@@ -428,6 +454,10 @@ LMMS_EXPORT int effectIndex(const Effect* effect);
 LMMS_EXPORT Effect* effectAt(collab_id_t owner, int index);
 //! The mixer channel with id @p id, or nullptr
 LMMS_EXPORT MixerChannel* findMixerChannel(collab_id_t id);
+//! How collaborators name a controller: its id (LFO), "p:<owner>:<n>" (Peak Controller effect) or "" (MIDI)
+LMMS_EXPORT QString controllerName(Controller* controller);
+//! The controller named @p name (see controllerName()), or nullptr
+LMMS_EXPORT Controller* findController(const QString& name);
 //! Position of the mixer channel @p id, or -1
 LMMS_EXPORT int mixerChannelIndex(collab_id_t id);
 

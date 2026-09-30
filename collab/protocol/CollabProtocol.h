@@ -84,6 +84,15 @@
 //         curve type (0 discrete, 1 linear, 2 cubic hermite), tension, nodes, and the automated parameters,
 //         named like in param.set. In XML, <object> elements carry the same as "owner" / "path" attributes
 //         (LMMS' own "id" differs on every client)
+//     Controllers (milestone M5c). LFO controllers of the Controller Rack have ids ("cid"; older projects:
+//     defaultControllerId()); Peak Controllers belong to their effect and are named "p:<ownerId>:<n>" (n-th
+//     effect of a track or mixer channel); MIDI controllers are each user's own devices and never shared.
+//     {op:"controller.add",    id, xml}                            a new LFO controller (<lfocontroller>)
+//     {op:"controller.remove", id}
+//     {op:"controller.set",    id, v:{name}}                       (a Peak Controller: "ref" instead of "id")
+//     {op:"controllers.state", xml}                                the whole <controllers>, stored by the server
+//     {op:"param.link", owner, path, controller}                   a parameter connected to a controller (its id or
+//         "p:..." name), or disconnected (""). param.set with a controller as owner: path "k:<n>" = its knobs
 // Tracks live in the "song" container (Song Editor) or the "patternstore" container (Pattern Editor).
 // Pattern N is the N-th pattern track in song order; its content is the N-th clip of every Pattern Editor
 // track, so reordering pattern tracks (track.order) also reorders those clips.
@@ -134,6 +143,7 @@ inline constexpr auto Error = "error";
  *       w: "song" | "pattern:<patternTrackId>" | "pianoroll:<clipId>" | "instrument:<trackId>"
  *          | "mixer" | "notes" | "controllers" | "effect:<ownerId>:<n>" (n-th effect of a track or mixer channel)
  *          | "automation:<clipId>" (Automation Editor: tick, y = value as a fraction of the automated range)
+ *          | "toolbar" (the main toolbar: tempo, time signature...) | "controller:<id>" (an LFO's Controls)
  *       a: "track:<trackId>" (tick = time, y = 0..1 within the track row),
  *          "head:<trackId>" (x, y = pixels within the track's header),
  *          "chan:<n>" (x, y = pixels within mixer channel n), "fx:<n>" (pixels within the effects of channel n);
@@ -177,7 +187,22 @@ inline constexpr auto MixerSet = "mixer.set";
 inline constexpr auto MixerSend = "mixer.send";
 inline constexpr auto MixerState = "mixer.state";
 inline constexpr auto AutomationSet = "automation.set";
+inline constexpr auto ControllerAdd = "controller.add";
+inline constexpr auto ControllerRemove = "controller.remove";
+inline constexpr auto ControllerSet = "controller.set";
+inline constexpr auto ControllersState = "controllers.state";
+inline constexpr auto ParamLink = "param.link";
 } // namespace op
+
+//! Id of the n-th controller in a project saved without controller ids.
+//! Must match collab::defaultControllerId() in include/CollabId.h.
+inline constexpr std::uint64_t defaultControllerId(int index)
+{
+	return 0x4354524c00000000ull + static_cast<std::uint64_t>(index);
+}
+
+//! "" (no controller), a controller id or "p:<ownerId>:<n>" (a Peak Controller effect)
+bool isValidControllerRef(const QJsonValue& value);
 
 //! Id of the mixer channel at @p index in a project saved without mixer channel ids.
 //! Must match collab::defaultMixerChannelId() in include/CollabId.h.

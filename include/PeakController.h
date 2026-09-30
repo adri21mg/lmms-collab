@@ -34,6 +34,7 @@ namespace lmms
 {
 
 
+class Effect;
 class PeakControllerEffect;
 
 using PeakControllerEffectVector = std::vector<PeakControllerEffect*>;
@@ -51,6 +52,12 @@ public:
 	void saveSettings( QDomDocument & _doc, QDomElement & _this ) override;
 	void loadSettings( const QDomElement & _this ) override;
 	QString nodeName() const override;
+
+	//! The Peak Controller effect this controller belongs to
+	Effect* effect() const;
+	//! Gives a Peak Controller effect the id that links it to its controller in saved projects. LMMS keeps
+	//! the saved one only while loading a project; a collaborator's copy of the effect must keep it too.
+	static void setEffectId(Effect* peakControllerEffect, int id);
 
 	static void initGetControllerBySetting();
 	static PeakController * getControllerBySetting( const QDomElement & _this );

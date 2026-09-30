@@ -27,6 +27,7 @@
 #define LMMS_CONTROLLER_H
 
 #include "lmms_export.h"
+#include "CollabId.h"
 #include "Engine.h"
 #include "Model.h"
 #include "JournallingObject.h"
@@ -137,6 +138,10 @@ public:
 
 	bool hasModel( const Model * m ) const;
 
+	//! Identity for collaboration (see CollabId.h); saved as the "cid" attribute, 0 if the settings had none
+	collab_id_t collabId() const { return m_collabId; }
+	void setCollabId(collab_id_t id) { m_collabId = id; }
+
 public slots:
 	virtual gui::ControllerDialog * createDialog( QWidget * _parent );
 
@@ -165,6 +170,7 @@ protected:
 
 	QString m_name;
 	ControllerType m_type;
+	collab_id_t m_collabId = 0;
 
 	static ControllerVector s_controllers;
 

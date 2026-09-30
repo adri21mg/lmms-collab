@@ -120,6 +120,14 @@ void ControllerView::moveDown() { emit movedDown(this); }
 
 void ControllerView::removeController() { emit removedController(this); }
 
+void ControllerView::updateName()
+{
+	m_nameLabel->setText(getController()->name());
+}
+
+
+
+
 void ControllerView::renameController()
 {
 	bool ok;

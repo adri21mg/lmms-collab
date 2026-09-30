@@ -55,6 +55,9 @@ public:
 		return( castModel<Controller>() );
 	}
 
+	//! Shows the controller's name again (e.g. after a collaborator renamed it)
+	void updateName();
+
 	inline const Controller * getController() const
 	{
 		return( castModel<Controller>() );

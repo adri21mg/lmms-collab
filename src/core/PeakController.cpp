@@ -173,6 +173,25 @@ void PeakController::loadSettings( const QDomElement & _this )
 
 
 
+Effect* PeakController::effect() const
+{
+	return m_peakEffect;
+}
+
+
+
+
+void PeakController::setEffectId(Effect* peakControllerEffect, int id)
+{
+	if (peakControllerEffect && QString{peakControllerEffect->descriptor()->name} == "peakcontrollereffect")
+	{
+		static_cast<PeakControllerEffect*>(peakControllerEffect)->m_effectId = id;
+	}
+}
+
+
+
+
 //Backward compatibility function for bug in <= 0.4.15
 void PeakController::initGetControllerBySetting()
 {

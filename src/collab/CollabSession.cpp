@@ -563,7 +563,16 @@ void CollabSession::applyTx(const QJsonObject& message)
 			applyRemoteParam(op, m_seq);
 			continue;
 		}
-		if (type == proto::op::TrackState || type == proto::op::MixerState) { continue; } // for the server's copy
+		if (type == proto::op::ParamLink)
+		{
+			flushNoteGroup();
+			applyRemoteLink(op, m_seq);
+			continue;
+		}
+		if (type == proto::op::TrackState || type == proto::op::MixerState || type == proto::op::ControllersState)
+		{
+			continue; // for the server's copy
+		}
 		if (type == proto::op::InstrumentSet || type == proto::op::EffectsSet)
 		{
 			flushNoteGroup();
@@ -596,6 +605,7 @@ void CollabSession::applyTx(const QJsonObject& message)
 		m_structure = currentStructure();
 		Engine::getSong()->setModified();
 	}
+	if (!m_unresolvedLinks.isEmpty()) { retryLinks(); } // e.g. a Peak Controller effect that just arrived
 	Engine::projectJournal()->setJournalling(journalling);
 }
 
@@ -1100,6 +1110,7 @@ CollabSession::Structure CollabSession::currentStructure() const
 	addTracks(Engine::patternStore(), true);
 	s.notes = currentNotes();
 	addMixerStructure(s);
+	addControllerStructure(s);
 	return s;
 }
 
@@ -1121,7 +1132,8 @@ void CollabSession::flushStructure()
 	};
 	auto isNew = [this](collab_id_t trackId) { return !m_structure.tracks.contains(trackId); };
 
-	// The mixer first: tracks sent below may already use new channels
+	// Controllers and the mixer first: tracks sent below may already use new ones
+	flushControllers(current, ops, ctx);
 	flushMixer(current, ops, ctx);
 
 	// New Song Editor tracks are sent complete (instrument, settings, clips); a new pattern also carries
@@ -1313,6 +1325,7 @@ void CollabSession::applyRemoteStructureOp(const QJsonObject& op)
 
 	m_applyingRemote = true;
 	if (type.startsWith("mixer.")) { applyRemoteMixerOp(op); }
+	else if (type.startsWith("controller.")) { applyRemoteControllerOp(op); }
 	else if (type == proto::op::TrackAdd)
 	{
 		QDomDocument doc;

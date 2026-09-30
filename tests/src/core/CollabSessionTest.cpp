@@ -40,7 +40,9 @@
 #include "DummyEffect.h"
 #include "Effect.h"
 #include "EffectChain.h"
+#include "ControllerConnection.h"
 #include "Engine.h"
+#include "LfoController.h"
 #include "Instrument.h"
 #include "InstrumentTrack.h"
 #include "MidiClip.h"
@@ -1052,6 +1054,75 @@ private slots:
 		QVERIFY(clip->getTimeMap().contains(192));
 		QVERIFY(!m_peer.nextForeignOp("automation.set").isEmpty());
 		journal->setJournalling(false);
+	}
+
+	// ---- M5c: controllers ----
+
+	void testControllersSync()
+	{
+		m_peer.drain();
+		Song* song = Engine::getSong();
+		auto instrument = dynamic_cast<InstrumentTrack*>(m_clip->getTrack());
+		const QString instrumentId = proto::idString(instrument->collabId());
+		auto pathOf = [&](const QString& name) {
+			for (const QString& line : CollabSession::describeParams(instrument))
+			{
+				if (line.endsWith(" " + name) && line.startsWith("t:")) { return line.section(' ', 0, 0); }
+			}
+			return QString{};
+		};
+
+		// An LFO added here reaches the peer, with the whole rack for the server
+		auto lfo = new LfoController(song);
+		song->addController(lfo);
+		const QString lfoId = proto::idString(lfo->collabId());
+		QCOMPARE(m_peer.nextForeignOp("controller.add").value("id").toString(), lfoId);
+		QVERIFY(m_peer.nextForeignOp("controllers.state").value("xml").toString().contains(lfoId));
+
+		// Renamed, a knob turned, a parameter connected to it
+		lfo->setName("Wobble");
+		QCOMPARE(m_peer.nextForeignOp("controller.set").value("v").toObject().value("name").toString(), QString{"Wobble"});
+		auto knob = lfo->findChildren<FloatModel*>().front();
+		knob->setValue(knob->value() == knob->maxValue() ? knob->minValue() : knob->maxValue());
+		const auto knobOp = m_peer.nextForeignOp("param.set");
+		QCOMPARE(knobOp.value("owner").toString(), lfoId);
+		QVERIFY(knobOp.value("path").toString().startsWith("k:"));
+		instrument->volumeModel()->setControllerConnection(new ControllerConnection(lfo));
+		const auto link = m_peer.nextForeignOp("param.link");
+		QCOMPARE(link.value("owner").toString(), instrumentId);
+		QCOMPARE(link.value("path").toString(), pathOf("Volume"));
+		QCOMPARE(link.value("controller").toString(), lfoId);
+
+		// An LFO added by the peer, and our panning connected to it, then disconnected
+		QDomDocument doc;
+		QDomElement parent = doc.createElement("collab");
+		doc.appendChild(parent);
+		lfo->saveState(doc, parent);
+		const QString remoteId = "0000000000200001";
+		QDomElement remoteXml = parent.firstChildElement();
+		remoteXml.setAttribute("cid", remoteId);
+		remoteXml.setAttribute("name", "Remote LFO");
+		m_peer.sendOps({QJsonObject{{"op", "controller.add"}, {"id", remoteId}, {"xml", toString(remoteXml)}}});
+		QTRY_VERIFY(findController(remoteId) != nullptr);
+		QCOMPARE(findController(remoteId)->name(), QString{"Remote LFO"});
+		m_peer.sendOps({QJsonObject{{"op", "param.link"}, {"owner", instrumentId}, {"path", pathOf("Panning")},
+			{"controller", remoteId}}});
+		QTRY_VERIFY(instrument->panningModel()->controllerConnection() != nullptr);
+		QCOMPARE(instrument->panningModel()->controllerConnection()->getController(), findController(remoteId));
+		QVERIFY2(m_peer.nextForeignOp("param.link", 500).isEmpty(), "no echo of a remote connection");
+		m_peer.sendOps({QJsonObject{{"op", "param.link"}, {"owner", instrumentId}, {"path", pathOf("Panning")},
+			{"controller", ""}}});
+		QTRY_VERIFY(instrument->panningModel()->controllerConnection() == nullptr);
+
+		// The peer removes its LFO; we disconnect and remove ours
+		m_peer.sendOps({QJsonObject{{"op", "controller.remove"}, {"id", remoteId}}});
+		QTRY_VERIFY(findController(remoteId) == nullptr);
+		m_peer.drain();
+		delete instrument->volumeModel()->controllerConnection();
+		instrument->volumeModel()->setControllerConnection(nullptr);
+		QCOMPARE(m_peer.nextForeignOp("param.link").value("controller").toString(), QString{});
+		song->removeController(lfo);
+		QCOMPARE(m_peer.nextForeignOp("controller.remove").value("id").toString(), lfoId);
 	}
 
 private:

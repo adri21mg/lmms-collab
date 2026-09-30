@@ -65,6 +65,12 @@ private:
 	bool applyParamOp(const QJsonObject& op);
 	bool applyMixerOp(const QString& type, const QJsonObject& op);
 	bool applyAutomationOp(const QJsonObject& op);
+	bool applyControllerOp(const QString& type, const QJsonObject& op);
+	//! Controller ids from the <controllers> element (ids added where missing)
+	void indexControllers();
+	bool isController(Id id) const { return id != 0 && (m_controllers.contains(id) || m_announcedControllers.contains(id)); }
+	//! A track, mixer channel or controller: something that owns synchronized parameters
+	bool isParamOwner(Id id) const;
 	//! Mixer channel ids by position, from the <mixer> element (ids added where missing)
 	void indexMixer();
 	//! Settings element of an instrument or sample track (it holds the "mixch" channel number)
@@ -109,6 +115,8 @@ private:
 	QDomElement m_mixer;                         // <mixer> of the song
 	std::vector<Id> m_channels;                  // mixer channel ids by position (0 = master)
 	QSet<Id> m_announcedChannels;                // added by mixer.add, until the mixer.state that follows
+	QSet<Id> m_controllers;                      // controllers of the Controller Rack
+	QSet<Id> m_announcedControllers;             // added by controller.add, until the controllers.state that follows
 };
 
 } // namespace lmms::collab

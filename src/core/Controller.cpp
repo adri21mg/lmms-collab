@@ -55,6 +55,7 @@ Controller::Controller( ControllerType _type, Model * _parent,
 {
 	if( _type != ControllerType::Dummy && _type != ControllerType::Midi )
 	{
+		m_collabId = collab::newId(); // a new controller; loading sets the saved id
 		s_controllers.push_back(this);
 		// Determine which name to use
 		for ( uint i=s_controllers.size(); ; i++ )
@@ -259,6 +260,7 @@ void Controller::saveSettings( QDomDocument & _doc, QDomElement & _this )
 {
 	_this.setAttribute( "type", static_cast<int>(type()) );
 	_this.setAttribute( "name", name() );
+	if (m_collabId != 0) { _this.setAttribute(collab::IdAttribute, collab::idToString(m_collabId)); }
 }
 
 
@@ -272,6 +274,8 @@ void Controller::loadSettings( const QDomElement & _this )
 	}
 
 	setName( _this.attribute( "name" ) );
+	// 0 if missing: the song then derives one from the controller's position (see Song::restoreControllerStates)
+	m_collabId = collab::idFromString(_this.attribute(collab::IdAttribute));
 }
 
 
