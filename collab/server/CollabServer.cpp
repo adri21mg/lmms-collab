@@ -288,6 +288,14 @@ void CollabServer::handleTx(Client& client, const QJsonObject& message)
 			const auto asset = p->library.constFind(o.value("hash").toString());
 			ok = asset != p->library.cend() && asset->path == o.value("path").toString()
 				&& asset->size == o.value("size").toInteger();
+			if (ok)
+			{
+				// Who shared it, as the others see it, is who sent it
+				QJsonObject announced = o;
+				announced.insert("by", client.user);
+				accepted.append(announced);
+				continue;
+			}
 		}
 		else { ok = op.isObject() && p->state.apply(op.toObject()); }
 		if (ok) { accepted.append(op); }

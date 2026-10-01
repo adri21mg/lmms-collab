@@ -49,6 +49,9 @@
 #include "CollabSessionUtil.h"
 #include "ConfigManager.h"
 #include "Engine.h"
+#include "FileBrowser.h"
+#include "TextFloat.h"
+#include "embed.h"
 #include "GuiApplication.h"
 #include "Instrument.h"
 #include "InstrumentTrack.h"
@@ -143,7 +146,25 @@ bool replaceFileRefs(QDomElement element, const QString& absolutePath, const QSt
 
 QString CollabSession::libraryDir() const
 {
-	return ConfigManager::inst()->workingDir() + "collab/" + m_project + "/library/";
+	// Its name is what the "Shared project" tab shows
+	return ConfigManager::inst()->workingDir() + "collab/" + m_project + "/Project files/";
+}
+
+
+void CollabSession::refreshSharedFiles()
+{
+	if (m_sharedFilesRefresh) { return; }
+	m_sharedFilesRefresh = true;
+	QTimer::singleShot(0, this, [this] {
+		m_sharedFilesRefresh = false;
+		auto gui = gui::getGUI();
+		if (!gui || !gui->mainWindow() || !gui->mainWindow()->sharedFilesBrowser()) { return; }
+		const QString factory = QDir::cleanPath(ConfigManager::inst()->factorySamplesDir()) + "*"
+			+ QDir::cleanPath(ConfigManager::inst()->factoryPresetsDir());
+		const bool connected = m_state == State::Live || m_state == State::Joining;
+		gui->mainWindow()->sharedFilesBrowser()->setDirectories(
+			connected ? QDir::cleanPath(libraryDir()) + "*" + factory : factory);
+	});
 }
 
 
@@ -161,13 +182,22 @@ void CollabSession::setLibrary(const QJsonArray& files)
 		m_library.insert(hash, SharedFile{path, file.value("size").toInteger()});
 		if (QFileInfo{libraryDir() + path}.size() != file.value("size").toInteger()) { writePlaceholder(libraryDir() + path); }
 	}
+	refreshSharedFiles();
 }
 
 
-void CollabSession::addLibraryFile(const QString& path, const QString& hash, qint64 size, bool fromOthers)
+void CollabSession::addLibraryFile(const QString& path, const QString& hash, qint64 size, bool fromOthers,
+	const QString& by)
 {
 	if (proto::sanitizeAssetName(path) != path || !proto::isValidHash(hash)) { return; }
 	m_library.insert(hash, SharedFile{path, size});
+	refreshSharedFiles();
+	if (fromOthers && gui::getGUI())
+	{
+		// So everybody knows where to find it: the "Shared project" tab
+		gui::TextFloat::displayMessage(tr("Shared file"), tr("%1 shared \"%2\" (Shared project tab)")
+			.arg(by.isEmpty() ? tr("A collaborator") : by, path), embed::getIconPixmap("sample_file"), 8000);
+	}
 	if (!fromOthers || QFileInfo{libraryDir() + path}.size() == size) { return; }
 	log(QString{"shared file %1 (%2 bytes) added by a collaborator"}.arg(path).arg(size));
 	// Everyone in the session has every shared file: it is downloaded right away
@@ -283,7 +313,8 @@ void CollabSession::handleAssetMessage(const QJsonObject& message)
 		const qint64 size = QFileInfo{local}.size();
 		if (!QFileInfo::exists(libraryDir() + path)) { QFile::copy(local, libraryDir() + path); }
 		m_library.insert(hash, SharedFile{path, size});
-		sendOps({QJsonObject{{"op", proto::op::LibraryAdd}, {"path", path}, {"hash", hash}, {"size", size}}});
+		sendOps({QJsonObject{{"op", proto::op::LibraryAdd}, {"path", path}, {"hash", hash}, {"size", size}, {"by", m_user}}});
+		refreshSharedFiles();
 		log(QString{"shared %1 as %2"}.arg(local, path));
 		rewriteReferences(local, path);
 	}
@@ -335,6 +366,7 @@ void CollabSession::handleBinary(const QByteArray& payload)
 		QFile::remove(libraryDir() + file.path);
 		QFile::rename(part, libraryDir() + file.path);
 		log(QString{"downloaded shared file %1"}.arg(file.path));
+		refreshSharedFiles();
 		if (m_state == State::Live) { reloadReferences(file.path); } // before joining, nothing uses it yet
 	}
 	else

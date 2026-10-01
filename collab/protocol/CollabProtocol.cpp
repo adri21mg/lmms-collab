@@ -331,8 +331,8 @@ std::optional<QString> validColor(const QJsonValue& value)
 std::optional<QJsonObject> sanitizePresence(const QJsonObject& message)
 {
 	static const QRegularExpression windowRe{
-		"^(song|toolbar|mixer|notes|controllers|(pattern|pianoroll|instrument|automation|controller):[0-9a-f]{16}|effect:[0-9a-f]{16}:[0-9]{1,3})$"};
-	static const QRegularExpression anchorRe{"^((track|head):[0-9a-f]{16}|(chan|fx):[0-9]{1,5})$"};
+		"^(song|toolbar|sidebar|files|mixer|notes|controllers|(pattern|pianoroll|instrument|automation|controller):[0-9a-f]{16}|effect:[0-9a-f]{16}:[0-9]{1,3})$"};
+	static const QRegularExpression anchorRe{"^((track|head):[0-9a-f]{16}|(chan|fx):[0-9]{1,5}|item:[^\\x00-\\x1f]{1,300})$"};
 	static const QRegularExpression idRe{"^[0-9a-f]{16}$"};
 	constexpr double MaxTicks = 1 << 30;
 	constexpr double MaxPixels = 100000;
@@ -403,6 +403,12 @@ std::optional<QJsonObject> sanitizePresence(const QJsonObject& message)
 	if (view.isObject())
 	{
 		QJsonObject clean;
+		if (view.toObject().contains("side"))
+		{
+			const auto side = number(view.toObject().value("side"), 0, 64);
+			if (!side) { return std::nullopt; }
+			clean.insert("side", *side);
+		}
 		if (view.toObject().contains("mixsel"))
 		{
 			const auto channel = number(view.toObject().value("mixsel"), 0, 10000);

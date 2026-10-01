@@ -61,7 +61,8 @@ public:
 	enum class Type
 	{
 		Normal,
-		Favorites
+		Favorites,
+		Folders //!< each directory is a top-level folder (shown with its own name)
 	};
 
 	//! @brief Create a file browser side bar widget
@@ -82,6 +83,12 @@ public:
 	~FileBrowser() override = default;
 
 	static QDir::Filters dirFilters() { return QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden; }
+
+	//! Shows other directories ('*'-separated), e.g. the shared files of another collaboration project
+	void setDirectories(const QString& directories);
+	//! Reads the directories again (e.g. after files were added)
+	void refresh() { reloadTree(); }
+	QTreeWidget* treeWidget() const;
 	static QDir::SortFlags sortFlags() { return QDir::LocaleAware | QDir::DirsFirst | QDir::Name | QDir::IgnoreCase; }
 
 private slots:

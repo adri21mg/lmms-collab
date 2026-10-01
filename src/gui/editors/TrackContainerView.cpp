@@ -25,7 +25,9 @@
 #include "TrackContainerView.h"
 
 
+#include <QFileInfo>
 #include <QLayout>
+#include <QMimeData>
 #include <QScrollBar>
 #include <QWheelEvent>
 
@@ -364,8 +366,31 @@ void TrackContainerView::clearAllTracks()
 
 
 
+//! Files dragged from outside LMMS (e.g. the Windows Explorer) that it can open as a new track
+static QStringList droppedFiles(const QMimeData* mime)
+{
+	QStringList files;
+	if (!mime || !mime->hasUrls()) { return files; }
+	for (const QUrl& url : mime->urls())
+	{
+		const QString file = url.toLocalFile();
+		const QString extension = FileItem::extension(file);
+		if (QFileInfo{file}.isFile()
+			&& (extension == "xpf" || !getPluginFactory()->pluginSupportingExtension(extension).isNull()))
+		{
+			files.append(file);
+		}
+	}
+	return files;
+}
+
 void TrackContainerView::dragEnterEvent( QDragEnterEvent * _dee )
 {
+	if (!droppedFiles(_dee->mimeData()).isEmpty())
+	{
+		_dee->acceptProposedAction();
+		return;
+	}
 	StringPairDrag::processDragEnterEvent( _dee,
 		QString( "presetfile,pluginpresetfile,samplefile,instrument,"
 				"importedproject,soundfontfile,patchfile,vstpluginfile,projectfile,"
@@ -388,6 +413,24 @@ void TrackContainerView::stopRubberBand()
 
 void TrackContainerView::dropEvent( QDropEvent * _de )
 {
+	// From outside LMMS: one new track per file, as if dropped from the side bar
+	if (const QStringList files = droppedFiles(_de->mimeData()); !files.isEmpty())
+	{
+		for (const QString& file : files)
+		{
+			auto it = dynamic_cast<InstrumentTrack*>(Track::create(Track::Type::Instrument, m_tc));
+			if (FileItem::extension(file) == "xpf")
+			{
+				DataFile dataFile(file);
+				it->loadPreset(dataFile.content().toElement());
+				continue;
+			}
+			PluginFactory::PluginInfoAndKey piakn = getPluginFactory()->pluginSupportingExtension(FileItem::extension(file));
+			if (Instrument* i = it->loadInstrument(piakn.info.name(), &piakn.key)) { i->loadFile(file); }
+		}
+		_de->acceptProposedAction();
+		return;
+	}
 	QString type = StringPairDrag::decodeKey( _de );
 	QString value = StringPairDrag::decodeValue( _de );
 	if( type == "instrument" )

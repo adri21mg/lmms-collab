@@ -43,6 +43,8 @@
 #include "AutomationClip.h"
 #include "AutomationEditor.h"
 #include "CollabSession.h"
+#include "FileBrowser.h"
+#include "SideBar.h"
 #include "Controller.h"
 #include "ControllerDialog.h"
 #include "ControllerRackView.h"
@@ -101,12 +103,61 @@ T* ancestor(QWidget* widget)
 //! The widget shown inside the MDI sub window that contains @p widget
 QWidget* contentOf(QWidget* widget)
 {
-	QWidget* toolBar = getGUI() && getGUI()->mainWindow() ? getGUI()->mainWindow()->toolBar() : nullptr;
+	MainWindow* mainWindow = getGUI() ? getGUI()->mainWindow() : nullptr;
+	if (!mainWindow) { return nullptr; }
 	for (; widget; widget = widget->parentWidget())
 	{
-		if (widget == toolBar || qobject_cast<QMdiSubWindow*>(widget->parentWidget())) { return widget; }
+		if (widget == mainWindow->toolBar() || widget == mainWindow->sideBar() || widget == mainWindow->sharedFilesBrowser()
+			|| qobject_cast<QMdiSubWindow*>(widget->parentWidget()))
+		{
+			return widget;
+		}
 	}
 	return nullptr;
+}
+
+//! "Project files/drums/kick.wav": the names from the top of the "Shared project" tab down to @p item
+QString itemPath(const QTreeWidgetItem* item)
+{
+	QStringList names;
+	for (; item; item = item->parent()) { names.prepend(item->text(0)); }
+	return names.join('/');
+}
+
+//! The item named by @p path in @p tree, or the deepest of its folders that exists (@p complete tells which)
+QTreeWidgetItem* itemByPath(QTreeWidget* tree, const QString& path, bool* complete = nullptr)
+{
+	QTreeWidgetItem* found = nullptr;
+	const QStringList names = path.split('/');
+	for (int level = 0; level < names.size(); ++level)
+	{
+		QTreeWidgetItem* next = nullptr;
+		const int count = found ? found->childCount() : tree->topLevelItemCount();
+		for (int i = 0; i < count && !next; ++i)
+		{
+			QTreeWidgetItem* candidate = found ? found->child(i) : tree->topLevelItem(i);
+			if (candidate->text(0) == names[level]) { next = candidate; }
+		}
+		if (!next)
+		{
+			if (complete) { *complete = false; }
+			return found;
+		}
+		found = next;
+	}
+	if (complete) { *complete = true; }
+	return found;
+}
+
+//! The deepest item along @p item's folders that can be seen (its folders are expanded)
+QTreeWidgetItem* visibleAncestor(QTreeWidgetItem* item)
+{
+	QTreeWidgetItem* visible = item;
+	for (QTreeWidgetItem* it = item; it; it = it->parent())
+	{
+		if (it->parent() && !it->parent()->isExpanded()) { visible = it->parent(); }
+	}
+	return visible;
 }
 
 //! The window (Controls) of the controller named @p name, if it was ever opened
@@ -565,6 +616,8 @@ QString CollabPresence::windowKeyOf(QWidget* content)
 	auto key = [](const char* kind, collab_id_t id) { return QString{"%1:%2"}.arg(kind, collab::idToString(id)); };
 	if (content == gui->songEditor()) { return "song"; }
 	if (gui->mainWindow() && content == gui->mainWindow()->toolBar()) { return "toolbar"; }
+	if (gui->mainWindow() && content == gui->mainWindow()->sideBar()) { return "sidebar"; }
+	if (gui->mainWindow() && content == gui->mainWindow()->sharedFilesBrowser()) { return "files"; }
 	if (auto dialog = dynamic_cast<ControllerDialog*>(content))
 	{
 		// The Controls window of an LFO (Peak Controllers are edited in their effect's window)
@@ -650,6 +703,20 @@ QJsonObject CollabPresence::localCursor() const
 			return cursor;
 		}
 	}
+	else if (content == getGUI()->mainWindow()->sharedFilesBrowser())
+	{
+		// The file or folder under the pointer, by name: everybody has the same tree here
+		QTreeWidget* tree = getGUI()->mainWindow()->sharedFilesBrowser()->treeWidget();
+		const QPoint p = tree->viewport()->mapFromGlobal(global);
+		if (QTreeWidgetItem* item = tree->viewport()->rect().contains(p) ? tree->itemAt(p) : nullptr)
+		{
+			const QRect rect = tree->visualItemRect(item);
+			cursor.insert("a", "item:" + itemPath(item));
+			cursor.insert("x", p.x() - rect.x());
+			cursor.insert("y", p.y() - rect.y());
+			return cursor;
+		}
+	}
 	else if (content == getGUI()->automationEditor())
 	{
 		// Time and value (as a fraction of the automated range), whatever each user's zoom and scroll
@@ -718,6 +785,10 @@ QJsonObject CollabPresence::localPlay()
 QJsonObject CollabPresence::localView()
 {
 	QJsonObject view;
+	if (SideBar* sideBar = getGUI()->mainWindow()->sideBar(); sideBar && sideBar->activeTab() >= 0)
+	{
+		view.insert("side", sideBar->activeTab());
+	}
 	MixerView* mixer = getGUI()->mixerView();
 	if (mixer && mixer->currentMixerChannel()) { view.insert("mixsel", mixer->currentMixerChannel()->channelIndex()); }
 	return view;
@@ -786,6 +857,16 @@ std::optional<QPoint> CollabPresence::locate(QWidget* content, const QJsonObject
 		PianoRoll* editor = getGUI()->pianoRoll()->editor();
 		return editor->mapTo(content, editor->pointOfTickKey(cursor.value("tick").toInt(), cursor.value("key").toInt()));
 	}
+	if (anchor.startsWith("item:") && content == getGUI()->mainWindow()->sharedFilesBrowser())
+	{
+		// Only where this user sees the same item (its folders expanded); otherwise its folder is outlined
+		QTreeWidget* tree = getGUI()->mainWindow()->sharedFilesBrowser()->treeWidget();
+		bool complete = false;
+		QTreeWidgetItem* item = itemByPath(tree, anchor.mid(5), &complete);
+		if (!item || !complete || visibleAncestor(item) != item) { return std::nullopt; }
+		const QRect rect = tree->visualItemRect(item);
+		return tree->viewport()->mapTo(content, rect.topLeft() + pixels);
+	}
 	if (content == getGUI()->automationEditor() && cursor.contains("tick"))
 	{
 		AutomationEditor* editor = getGUI()->automationEditor()->m_editor;
@@ -806,6 +887,19 @@ std::optional<QPoint> CollabPresence::locate(QWidget* content, const QJsonObject
 
 std::optional<QRect> CollabPresence::tabHint(QWidget* content, const QJsonObject& cursor) const
 {
+	// Shared files: the item the collaborator points at, or the folder it is in if that one is collapsed here
+	const QString anchor = cursor.value("a").toString();
+	if (anchor.startsWith("item:") && content == getGUI()->mainWindow()->sharedFilesBrowser()
+		&& cursor.value("w").toString() == "files")
+	{
+		QTreeWidget* tree = getGUI()->mainWindow()->sharedFilesBrowser()->treeWidget();
+		QTreeWidgetItem* item = itemByPath(tree, anchor.mid(5));
+		if (!item) { return std::nullopt; }
+		const QRect rect = tree->visualItemRect(visibleAncestor(item));
+		if (rect.isEmpty()) { return std::nullopt; }
+		return QRect{tree->viewport()->mapTo(content, rect.topLeft()), rect.size()}.intersected(
+			shownRect(tree->viewport(), content));
+	}
 	auto window = dynamic_cast<InstrumentTrackWindow*>(content);
 	if (!window || !cursor.contains("tab") || cursor.value("w").toString() != windowKeyOf(content)) { return std::nullopt; }
 	TabWidget* tabs = window->tabWidgetParent();
@@ -845,6 +939,10 @@ QRect CollabPresence::visibleRect(QWidget* content, const QJsonObject& cursor) c
 		PianoRoll* editor = getGUI()->pianoRoll()->editor();
 		const QRect grid = editor->noteGridRect();
 		return QRect{editor->mapTo(content, grid.topLeft()), grid.size()}.intersected(content->rect());
+	}
+	if (anchor.startsWith("item:") && content == getGUI()->mainWindow()->sharedFilesBrowser())
+	{
+		return shownRect(getGUI()->mainWindow()->sharedFilesBrowser()->treeWidget()->viewport(), content);
 	}
 	if (content == getGUI()->automationEditor() && cursor.contains("tick"))
 	{
@@ -898,6 +996,13 @@ std::vector<CollabPresence::Marker> CollabPresence::markers(QWidget* content, co
 
 std::optional<QRect> CollabPresence::mixerSelection(QWidget* content, const QJsonObject& view) const
 {
+	// The side bar: the tab the collaborator has open
+	if (SideBar* sideBar = getGUI()->mainWindow()->sideBar(); content == sideBar && view.contains("side"))
+	{
+		QToolButton* button = sideBar->tabButton(view.value("side").toInt());
+		if (!button) { return std::nullopt; }
+		return QRect{button->mapTo(content, QPoint{0, 0}), button->size()};
+	}
 	MixerView* mixer = mixerOf(content);
 	if (!mixer || !view.contains("mixsel")) { return std::nullopt; }
 	const int channel = view.value("mixsel").toInt();
@@ -913,7 +1018,11 @@ std::optional<QRect> CollabPresence::mixerSelection(QWidget* content, const QJso
 void CollabPresence::updateOverlays()
 {
 	// One overlay per open window that can show collaborators; they only repaint what changed
-	std::vector<QWidget*> contents{m_mainWindow->toolBar()};
+	std::vector<QWidget*> contents{m_mainWindow->toolBar(), m_mainWindow->sideBar()};
+	if (m_mainWindow->sharedFilesBrowser() && m_mainWindow->sharedFilesBrowser()->isVisible())
+	{
+		contents.push_back(m_mainWindow->sharedFilesBrowser());
+	}
 	for (QMdiSubWindow* subWindow : m_mainWindow->workspace()->subWindowList())
 	{
 		if (subWindow->isVisible()) { contents.push_back(subWindow->widget()); }
@@ -939,6 +1048,8 @@ QString CollabPresence::describeWindow(const QString& window)
 	const collab_id_t id = collab::idFromString(idPart(window));
 	if (window == "song") { return tr("Song Editor"); }
 	if (window == "toolbar") { return tr("Main toolbar"); }
+	if (window == "sidebar") { return tr("Side bar"); }
+	if (window == "files") { return tr("Shared project files"); }
 	if (window.startsWith("controller:"))
 	{
 		const Controller* c = collab::findController(idPart(window));
@@ -990,6 +1101,21 @@ void CollabPresence::goTo(const QString& clientId)
 	auto gui = getGUI();
 
 	if (window == "song") { bringToFront(m_mainWindow, gui->songEditor()); }
+	else if (window == "files")
+	{
+		SideBar* sideBar = m_mainWindow->sideBar();
+		FileBrowser* files = m_mainWindow->sharedFilesBrowser();
+		for (int i = 0; i < sideBar->tabCount(); ++i)
+		{
+			if (sideBar->tabButton(i)->toolTip() == files->title() && !files->isVisible()) { sideBar->tabButton(i)->click(); }
+		}
+		const QString anchor = it->second.cursor.value("a").toString();
+		if (QTreeWidgetItem* item = anchor.startsWith("item:") ? itemByPath(files->treeWidget(), anchor.mid(5)) : nullptr)
+		{
+			for (QTreeWidgetItem* parent = item->parent(); parent; parent = parent->parent()) { parent->setExpanded(true); }
+			files->treeWidget()->scrollToItem(item);
+		}
+	}
 	else if (window.startsWith("controller:"))
 	{
 		// Its Controls window, opened like its button in the Controller Rack does

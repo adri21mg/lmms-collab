@@ -310,8 +310,10 @@ private:
 	//! This project's shared files on this computer (<workspace>/collab/<project>/library)
 	QString libraryDir() const;
 	void setLibrary(const QJsonArray& files);
-	//! A shared file announced by the server or a collaborator; downloaded if it is not here
-	void addLibraryFile(const QString& path, const QString& hash, qint64 size, bool fromOthers);
+	//! A shared file announced by the server or a collaborator (@p by); downloaded if it is not here
+	void addLibraryFile(const QString& path, const QString& hash, qint64 size, bool fromOthers, const QString& by = {});
+	//! The "Shared project" tab shows this project's files (or only LMMS' own when not connected)
+	void refreshSharedFiles();
 	//! Shared files of the project missing here
 	QStringList missingFiles() const;
 	//! Before joining a project: downloads its shared files missing here. With a GUI the user agrees first
@@ -494,6 +496,7 @@ private:
 	qint64 m_downloadDone = 0;
 	std::optional<QJsonObject> m_pendingJoin;    //!< joined message waiting for its shared files
 	bool m_reading = false;                      //!< in onReadyRead() (dialogs process events meanwhile)
+	bool m_sharedFilesRefresh = false;           //!< a refresh of the "Shared project" tab is scheduled
 	QSet<collab_id_t> m_forcePluginCheck;        //!< instruments whose state must be compared at the next flush
 	QSet<collab_id_t> m_editedTracks;  //!< tracks with open plugin windows at the last check
 	QSet<collab_id_t> m_externalGuiTracks; //!< edited tracks whose plugins have a window of their own

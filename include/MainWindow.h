@@ -43,7 +43,9 @@ namespace lmms
 namespace gui
 {
 
+class FileBrowser;
 class PluginView;
+class SideBar;
 class SubWindow;
 class ToolButton;
 
@@ -61,6 +63,10 @@ public:
 	{
 		return m_toolBar;
 	}
+
+	SideBar* sideBar() { return m_sideBar; }
+	//! The files of the collaboration project (and LMMS' own), in the side bar
+	FileBrowser* sharedFilesBrowser() { return m_sharedFiles; }
 
 	int addWidgetToToolBar( QWidget * _w, int _row = -1, int _col = -1 );
 	void addSpacingToToolBar( int _size );
@@ -214,6 +220,8 @@ private:
 	};
 
 	MovableQMdiArea * m_workspace;
+	SideBar* m_sideBar = nullptr;
+	FileBrowser* m_sharedFiles = nullptr;
 
 	QWidget * m_toolBar;
 	QGridLayout * m_toolBarLayout;

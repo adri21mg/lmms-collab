@@ -22,6 +22,8 @@
  *
  */
 
+#include <algorithm>
+
 #include <QStyleOptionToolButton>
 #include <QStylePainter>
 #include <QToolButton>
@@ -103,6 +105,12 @@ SideBar::SideBar( Qt::Orientation _orientation, QWidget * _parent ) :
 
 void SideBar::appendTab( SideBarWidget *widget )
 {
+	insertTab(tabCount(), widget);
+}
+
+
+void SideBar::insertTab(int index, SideBarWidget* widget)
+{
 	auto button = new SideBarButton(orientation(), this);
 	button->setText( " " + widget->title() );
 	button->setIcon( widget->icon() );
@@ -110,7 +118,10 @@ void SideBar::appendTab( SideBarWidget *widget )
 	button->setCheckable( true );
 	m_widgets[button] = widget;
 	m_btnGroup.addButton( button );
-	addWidget( button );
+	index = std::clamp(index, 0, tabCount());
+	if (index < tabCount()) { insertWidget(actions()[index], button); }
+	else { addWidget(button); }
+	m_order.insert(m_order.begin() + index, button);
 
 	widget->hide();
 	widget->setMinimumWidth( 200 );
@@ -119,6 +130,25 @@ void SideBar::appendTab( SideBarWidget *widget )
 
 	connect(widget, &SideBarWidget::closeButtonClicked,
 		[=]() { button->click(); });
+}
+
+
+
+
+int SideBar::activeTab() const
+{
+	for (int i = 0; i < tabCount(); ++i)
+	{
+		const QWidget* widget = m_widgets.value(m_order[i]);
+		if (widget && widget->isVisible()) { return i; }
+	}
+	return -1;
+}
+
+
+QToolButton* SideBar::tabButton(int index) const
+{
+	return index >= 0 && index < tabCount() ? m_order[index] : nullptr;
 }
 
 

@@ -254,6 +254,7 @@ void CollabSession::disconnectFromServer()
 	m_forcePluginCheck.clear();
 	if (m_downloadProgress) { m_downloadProgress->close(); }
 	emit presenceCleared();
+	refreshSharedFiles(); // back to LMMS' own files
 	if (m_socket)
 	{
 		// This may run inside one of the socket's own signal handlers, so delete it later
@@ -623,7 +624,8 @@ void CollabSession::applyTx(const QJsonObject& message)
 		}
 		if (type == proto::op::LibraryAdd)
 		{
-			addLibraryFile(op.value("path").toString(), op.value("hash").toString(), op.value("size").toInteger(), true);
+			addLibraryFile(op.value("path").toString(), op.value("hash").toString(), op.value("size").toInteger(), true,
+				op.value("by").toString().left(64));
 			continue;
 		}
 		if (type == proto::op::TrackState || type == proto::op::MixerState || type == proto::op::ControllersState)

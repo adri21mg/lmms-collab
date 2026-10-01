@@ -102,6 +102,7 @@ MainWindow::MainWindow() :
 	hbox->setContentsMargins(0, 0, 0, 0);
 
 	auto sideBar = new SideBar(Qt::Vertical, w);
+	m_sideBar = sideBar;
 
 	auto splitter = new QSplitter(Qt::Horizontal, w);
 	splitter->setChildrenCollapsible( false );
@@ -112,6 +113,13 @@ MainWindow::MainWindow() :
 	emit initProgress(tr("Preparing plugin browser"));
 	sideBar->appendTab( new PluginBrowser( splitter ) );
 	emit initProgress(tr("Preparing file browsers"));
+
+	// Collaboration: the same files for everybody in a session (the project's shared files and LMMS' own)
+	m_sharedFiles = new FileBrowser(FileBrowser::Type::Folders,
+		QDir::cleanPath(confMgr->factorySamplesDir()) + "*" + QDir::cleanPath(confMgr->factoryPresetsDir()),
+		FileItem::defaultFilters(), tr("Shared project"),
+		embed::getIconPixmap("folder").transformed(QTransform().rotate(90)), splitter, false);
+	sideBar->appendTab(m_sharedFiles);
 
 	sideBar->appendTab(new FileBrowser(FileBrowser::Type::Favorites, ConfigManager::inst()->favoriteItems().join("*"), FileItem::defaultFilters(), "My Favorites",
 		embed::getIconPixmap("star").transformed(QTransform().rotate(90)), splitter, false, "", ""));

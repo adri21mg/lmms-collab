@@ -25,6 +25,8 @@
 #ifndef LMMS_GUI_SIDE_BAR_H
 #define LMMS_GUI_SIDE_BAR_H
 
+#include <vector>
+
 #include <QMap>
 #include <QButtonGroup>
 #include <QToolBar>
@@ -45,6 +47,14 @@ public:
 	~SideBar() override = default;
 
 	void appendTab( SideBarWidget * _sbw );
+	//! Inserts a tab at @p index (for collaboration's shared files, next to the instruments)
+	void insertTab(int index, SideBarWidget* widget);
+
+	//! Tabs in their order, for showing where collaborators are
+	int tabCount() const { return static_cast<int>(m_order.size()); }
+	//! The tab whose widget is shown, or -1
+	int activeTab() const;
+	QToolButton* tabButton(int index) const;
 
 
 private slots:
@@ -55,6 +65,7 @@ private:
 	QButtonGroup m_btnGroup;
 	using ButtonMap = QMap<QToolButton*, QWidget*>;
 	ButtonMap m_widgets;
+	std::vector<QToolButton*> m_order;
 
 } ;
 

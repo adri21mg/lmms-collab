@@ -315,6 +315,16 @@ void FileBrowser::reloadTree()
 			addItems(path);
 		}
 		break;
+	case Type::Folders:
+		for (const auto& path : paths)
+		{
+			const QFileInfo info{QDir::cleanPath(path)};
+			if (info.isDir())
+			{
+				m_fileBrowserTreeWidget->addTopLevelItem(new Directory(info.fileName(), info.absolutePath(), m_filter));
+			}
+		}
+		break;
 	}
 
 	if (m_filterEdit->text().isEmpty())
@@ -326,6 +336,24 @@ void FileBrowser::reloadTree()
 		onSearch(m_filterEdit->text());
 	}
 }
+
+
+
+void FileBrowser::setDirectories(const QString& directories)
+{
+	if (directories == m_directories) { return reloadTree(); }
+	m_directories = directories;
+	reloadTree();
+}
+
+
+
+
+QTreeWidget* FileBrowser::treeWidget() const
+{
+	return m_fileBrowserTreeWidget;
+}
+
 
 
 

@@ -100,7 +100,8 @@
 //     {op:"controller.remove", id}
 //     {op:"controller.set",    id, v:{name}}                       (a Peak Controller: "ref" instead of "id")
 //     {op:"controllers.state", xml}                                the whole <controllers>, stored by the server
-//     {op:"library.add", path, hash, size}                          a file uploaded by the sender is now shared
+//     {op:"library.add", path, hash, size, by}                      a file uploaded by the sender (user name: by)
+//                                                                   is now shared
 //     {op:"param.link", owner, path, controller}                   a parameter connected to a controller (its id or
 //         "p:..." name), or disconnected (""). param.set with a controller as owner: path "k:<n>" = its knobs
 // Tracks live in the "song" container (Song Editor) or the "patternstore" container (Pattern Editor).
@@ -172,6 +173,7 @@ QByteArray encodeBinaryFrame(const QByteArray& hash, const QByteArray& data);
  *          | "mixer" | "notes" | "controllers" | "effect:<ownerId>:<n>" (n-th effect of a track or mixer channel)
  *          | "automation:<clipId>" (Automation Editor: tick, y = value as a fraction of the automated range)
  *          | "toolbar" (the main toolbar: tempo, time signature...) | "controller:<id>" (an LFO's Controls)
+ *          | "sidebar" | "files" (the "Shared project" tab: anchor "item:<names from the top, joined by '/'>")
  *       a: "track:<trackId>" (tick = time, y = 0..1 within the track row),
  *          "head:<trackId>" (x, y = pixels within the track's header),
  *          "chan:<n>" (x, y = pixels within mixer channel n), "fx:<n>" (pixels within the effects of channel n);
@@ -181,7 +183,7 @@ QByteArray encodeBinaryFrame(const QByteArray& hash, const QByteArray& data);
  *       song / pattern: positions of the Song Editor and Pattern Editor timelines (where Play starts),
  *       pref: the pattern shown in the Pattern Editor,
  *       while playing: mode "song" | "pattern" | "clip", tick, ref (pattern track or clip id)
- *   view: null or {mixsel?: selected mixer channel}
+ *   view: null or {mixsel?: selected mixer channel, side?: open tab of the side bar}
  * Musical positions (tick/key/track/channel) look right regardless of each user's zoom and scroll.
  */
 //! Returns a copy with only valid, known fields, or nullopt if the message is malformed

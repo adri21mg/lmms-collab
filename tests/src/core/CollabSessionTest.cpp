@@ -1181,7 +1181,7 @@ private slots:
 	void testSharedFiles()
 	{
 		m_peer.drain();
-		const QString libraryDir = m_dataDir.filePath("workspace/collab/session-test/library/");
+		const QString libraryDir = m_dataDir.filePath("workspace/collab/session-test/Project files/");
 		QCOMPARE(PathUtil::sharedLocation(), QDir::cleanPath(libraryDir) + "/");
 
 		// A sample only this computer has: shared first (no GUI: without asking), then the new track names it
@@ -1250,7 +1250,7 @@ private slots:
 		// While this client downloads the project's files to join, the peer goes on: a new track, a new shared
 		// file and a clip using it. All of it is applied once the download is done, in order.
 		auto session = CollabSession::instance();
-		const QString libraryDir = m_dataDir.filePath("workspace/collab/session-test/library/");
+		const QString libraryDir = m_dataDir.filePath("workspace/collab/session-test/Project files/");
 		session->disconnectFromServer();
 		QByteArray big(40 * 1024 * 1024, '\0');
 		for (int i = 0; i < big.size(); i += 4096) { big[i] = static_cast<char>(i / 4096); }
