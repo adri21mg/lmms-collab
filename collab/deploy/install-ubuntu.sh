@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs the LMMS collaboration server on Ubuntu (22.04 or newer) / Debian as a service that starts with
+# Installs the LMMS collaboration server on Ubuntu (24.04 or newer) / Debian (12 or newer) as a service that starts with
 # the computer. Run it from the LMMS source folder:
 #
 #   sudo bash collab/deploy/install-ubuntu.sh                 # listens on every address
