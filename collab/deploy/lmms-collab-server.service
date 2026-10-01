@@ -1,0 +1,27 @@
+# systemd unit for the LMMS collaboration server (installed by install-ubuntu.sh)
+[Unit]
+Description=LMMS collaboration server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=lmms-collab
+Group=lmms-collab
+# LISTEN and PORT are set in /etc/default/lmms-collab-server
+Environment=LISTEN=0.0.0.0
+Environment=PORT=42871
+EnvironmentFile=-/etc/default/lmms-collab-server
+ExecStart=/usr/local/bin/lmms-collab-server --listen ${LISTEN} --port ${PORT} --data /var/lib/lmms-collab
+# Saves every project on stop (SIGTERM)
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lmms-collab
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

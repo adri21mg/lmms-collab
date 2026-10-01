@@ -72,7 +72,7 @@ CollabMenu::CollabMenu(MainWindow* mainWindow) :
 	m_mainWindow(mainWindow)
 {
 	m_connectAction = addAction(tr("Connect..."), this, &CollabMenu::showConnectDialog);
-	m_disconnectAction = addAction(tr("Disconnect"), this, [] { CollabSession::instance()->disconnectFromServer(); });
+	m_disconnectAction = addAction(tr("Disconnect"), this, [] { CollabSession::instance()->leave(); });
 	m_saveAction = addAction(tr("Save on server now"), this, [] { CollabSession::instance()->saveNow(); });
 	m_stopHostingAction = addAction(tr("Stop hosting the session"), this, &CollabMenu::stopHosting);
 	addSeparator();
@@ -102,7 +102,11 @@ void CollabMenu::updateState()
 {
 	const auto session = CollabSession::instance();
 	QString status;
-	switch (session->state())
+	if (session->isReconnecting())
+	{
+		status = tr("Connection lost: reconnecting to \"%1\"...").arg(session->projectName());
+	}
+	else switch (session->state())
 	{
 	case CollabSession::State::Disconnected: status = tr("Not connected"); break;
 	case CollabSession::State::Connecting: status = tr("Connecting..."); break;
@@ -110,10 +114,14 @@ void CollabMenu::updateState()
 	case CollabSession::State::Live:
 		status = tr("Connected to \"%1\" as %2").arg(session->projectName(), session->userName());
 		break;
+	case CollabSession::State::Reconnecting:
+		status = tr("Connection lost: reconnecting to \"%1\"...").arg(session->projectName());
+		break;
 	}
 	m_statusAction->setText(status);
-	m_connectAction->setEnabled(session->state() == CollabSession::State::Disconnected);
-	m_disconnectAction->setEnabled(session->state() != CollabSession::State::Disconnected);
+	const bool idle = session->state() == CollabSession::State::Disconnected && !session->isReconnecting();
+	m_connectAction->setEnabled(idle);
+	m_disconnectAction->setEnabled(!idle); // also stops reconnecting
 	m_saveAction->setEnabled(session->state() == CollabSession::State::Live);
 	m_stopHostingAction->setVisible(isHosting());
 }

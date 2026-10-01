@@ -139,10 +139,15 @@ private:
 	void updateStatus();
 	//! Makes the menu bar place this bar again (its size changed)
 	void relayout();
+	//! Same height as the menu bar's items, so the menu bar never changes its height
+	void matchMenuHeight();
+	void updateSpinner();
 
 	CollabPresence* m_presence;
 	QHBoxLayout* m_layout;
 	QToolButton* m_status;
+	QTimer* m_spinner;
+	int m_spinnerAngle = 0;
 };
 
 } // namespace lmms::gui

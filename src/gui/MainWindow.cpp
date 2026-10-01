@@ -38,6 +38,7 @@
 #include "AboutDialog.h"
 #include "AutomationEditor.h"
 #include "CollabMenu.h"
+#include "CollabSession.h"
 #include "ControllerRackView.h"
 #include "DeprecationHelper.h"
 #include "embed.h"
@@ -617,6 +618,13 @@ bool MainWindow::mayChangeProject(bool stopPlayback)
 	if( !Engine::getSong()->isModified() && getSession() != SessionState::Recover )
 	{
 		return( true );
+	}
+
+	// In a collaboration session the work is on the server: make sure the last of it arrived, then nothing to ask
+	if (collab::CollabSession::instance()->waitUntilSaved(3000))
+	{
+		Engine::getSong()->clearModified();
+		return true;
 	}
 
 	// Separate message strings for modified and recovered files

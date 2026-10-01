@@ -283,6 +283,12 @@ public:
 		return m_modified;
 	}
 
+	//! Collaboration: the work is on the server (or the change tracking restarts after a lost connection)
+	void clearModified()
+	{
+		setModified(false);
+	}
+
 	QString nodeName() const override
 	{
 		return "song";

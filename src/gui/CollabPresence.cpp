@@ -23,6 +23,11 @@
  */
 
 #include "CollabPresence.h"
+#include "lmmsconfig.h"
+
+#ifdef LMMS_BUILD_WIN32
+#include <windows.h>
+#endif
 
 #include <algorithm>
 #include <QCoreApplication>
@@ -661,10 +666,25 @@ QString CollabPresence::windowKeyOf(QWidget* content)
 }
 
 
+//! Whether the mouse pointer is really over @p window, and not over another program's window on top of it
+static bool pointerOver(QWidget* window)
+{
+#ifdef LMMS_BUILD_WIN32
+	POINT point;
+	if (!GetCursorPos(&point)) { return false; }
+	const HWND under = WindowFromPoint(point);
+	return under && GetAncestor(under, GA_ROOT) == reinterpret_cast<HWND>(window->winId());
+#else
+	return window->underMouse(); // enter and leave events come from the window system, which knows what is on top
+#endif
+}
+
+
 QJsonObject CollabPresence::localCursor() const
 {
 	const QPoint global = QCursor::pos();
 	QWidget* widget = QApplication::widgetAt(global); // only this instance's windows
+	if (!widget || !pointerOver(widget->window())) { return {}; } // another program's window may be on top
 	QWidget* content = contentOf(widget);
 	const QString window = windowKeyOf(content);
 	if (window.isEmpty()) { return {}; }
@@ -1222,6 +1242,10 @@ CollabPresenceBar::CollabPresenceBar(CollabPresence* presence, QWidget* parent) 
 	m_status = new QToolButton(this);
 	m_status->setAutoRaise(true);
 	m_status->setFixedHeight(height());
+	m_status->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+	// A turning wheel while the connection is being got back
+	m_spinner = new QTimer(this);
+	connect(m_spinner, &QTimer::timeout, this, &CollabPresenceBar::updateSpinner);
 	m_layout->addWidget(m_status);
 	connect(m_status, &QToolButton::clicked, this, [] { collab::CollabSession::instance()->saveNow(); });
 	auto session = collab::CollabSession::instance();
@@ -1234,13 +1258,65 @@ CollabPresenceBar::CollabPresenceBar(CollabPresence* presence, QWidget* parent) 
 	connect(presence, &CollabPresence::usersChanged, this, &CollabPresenceBar::rebuild);
 	updateStatus();
 	rebuild();
+	QTimer::singleShot(0, this, &CollabPresenceBar::matchMenuHeight); // once the menu bar has laid out its items
+}
+
+
+void CollabPresenceBar::matchMenuHeight()
+{
+	auto menuBar = qobject_cast<QMenuBar*>(parentWidget());
+	if (!menuBar || menuBar->actions().isEmpty()) { return; }
+	const int itemHeight = menuBar->actionGeometry(menuBar->actions().first()).height();
+	if (itemHeight <= 0 || itemHeight == height()) { return; }
+	setFixedHeight(itemHeight);
+	for (auto button : findChildren<QToolButton*>(QString{}, Qt::FindDirectChildrenOnly))
+	{
+		button->setFixedHeight(itemHeight);
+	}
+	relayout();
+}
+
+
+void CollabPresenceBar::updateSpinner()
+{
+	m_spinnerAngle = (m_spinnerAngle + 30) % 360;
+	const int size = std::max(8, height() - 8);
+	const qreal ratio = devicePixelRatioF();
+	QPixmap wheel{QSize{size, size} * ratio};
+	wheel.setDevicePixelRatio(ratio);
+	wheel.fill(Qt::transparent);
+	QPainter p{&wheel};
+	p.setRenderHint(QPainter::Antialiasing);
+	QPen pen{palette().color(QPalette::ButtonText), 2.0};
+	pen.setCapStyle(Qt::RoundCap);
+	p.setPen(pen);
+	// A 3/4 circle that turns (angles are in 1/16 degree)
+	p.drawArc(QRectF{1.5, 1.5, size - 3.0, size - 3.0}, -m_spinnerAngle * 16, 270 * 16);
+	p.end();
+	m_status->setIconSize(QSize{size, size});
+	m_status->setIcon(QIcon{wheel});
 }
 
 
 void CollabPresenceBar::updateStatus()
 {
 	auto session = collab::CollabSession::instance();
-	const bool live = session->state() == collab::CollabSession::State::Live;
+	// Each attempt goes through Connecting and Joining: it is all "reconnecting" here, so nothing blinks
+	const bool reconnecting = session->isReconnecting();
+	const bool live = session->state() == collab::CollabSession::State::Live || reconnecting;
+	if (reconnecting != m_spinner->isActive())
+	{
+		if (reconnecting)
+		{
+			updateSpinner();
+			m_spinner->start(80);
+		}
+		else
+		{
+			m_spinner->stop();
+			m_status->setIcon(QIcon{});
+		}
+	}
 	if (m_status->isVisibleTo(this) != live)
 	{
 		m_status->setVisible(live);
@@ -1248,7 +1324,8 @@ void CollabPresenceBar::updateStatus()
 	}
 	if (!live) { return; }
 	QString text;
-	switch (session->syncStatus())
+	if (reconnecting) { text = tr("Connection lost: reconnecting..."); }
+	else switch (session->syncStatus())
 	{
 	case collab::CollabSession::SyncStatus::Sending: text = tr("Sending..."); break;
 	case collab::CollabSession::SyncStatus::Saving: text = tr("Saving..."); break;

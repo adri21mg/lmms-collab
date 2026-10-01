@@ -29,6 +29,10 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QPushButton>
+#include <QMessageBox>
+#include <QFileDialog>
 #include <QDomDocument>
 #include <QFile>
 #include <QGuiApplication>
@@ -194,15 +198,21 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 	m_color = color;
 	const QString logDir = ConfigManager::inst()->workingDir() + "collab/";
 	QDir{}.mkpath(logDir);
-	// The previous session's log is kept: it matters most after a crash, and LMMS is then started again
-	m_log.reset(); // closed, or Windows does not rename it
-	QFile::remove(logDir + "session.previous.log");
-	QFile::rename(logDir + "session.log", logDir + "session.previous.log");
-	m_log = std::make_unique<QFile>(logDir + "session.log");
-	if (!m_log->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) { m_log.reset(); }
+	// The previous session's log is kept: it matters most after a crash, and LMMS is then started again.
+	// Attempts to get a lost session back continue its log.
+	if (!m_reconnecting || !m_log)
+	{
+		m_log.reset(); // closed, or Windows does not rename it
+		QFile::remove(logDir + "session.previous.log");
+		QFile::rename(logDir + "session.log", logDir + "session.previous.log");
+		m_log = std::make_unique<QFile>(logDir + "session.log");
+		if (!m_log->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) { m_log.reset(); }
+	}
 	log(QString{"connect %1:%2 as %3, project %4"}.arg(host).arg(port).arg(user, project));
 	m_project = project;
 	m_joinMode = mode;
+	m_host = host;
+	m_port = port;
 	m_seq = 0;
 	m_nextCtx = 1;
 	m_ackedCtx = 0;
@@ -214,7 +224,12 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 		send({{"t", proto::msg::Hello}, {"proto", proto::Version}, {"user", m_user}, {"color", m_color}});
 	});
 	connect(m_socket.get(), &QTcpSocket::readyRead, this, &CollabSession::onReadyRead);
+	connect(m_socket.get(), &QTcpSocket::disconnected, this, [this] {
+		if (m_state == State::Live) { startReconnecting(); }
+	});
 	connect(m_socket.get(), &QTcpSocket::errorOccurred, this, [this] {
+		// A session that was going on (or is being got back) tries again; a first connection reports the error
+		if (m_state == State::Live || m_reconnecting) { return startReconnecting(); }
 		fail(tr("Connection error: %1").arg(m_socket ? m_socket->errorString() : QString{}));
 	});
 	setState(State::Connecting);
@@ -270,6 +285,125 @@ void CollabSession::disconnectFromServer()
 }
 
 
+void CollabSession::leave()
+{
+	m_reconnecting = false;
+	disconnectFromServer();
+}
+
+
+bool CollabSession::waitUntilSaved(int timeoutMs)
+{
+	if (m_state != State::Live) { return false; }
+	saveNow();
+	QElapsedTimer timer;
+	timer.start();
+	// The answer only counts once everything we sent was acknowledged and saved
+	while (syncStatus() != SyncStatus::Saved && timer.elapsed() < timeoutMs && m_state == State::Live)
+	{
+		QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+	}
+	return syncStatus() == SyncStatus::Saved && m_state == State::Live;
+}
+
+
+void CollabSession::startReconnecting()
+{
+	if (!m_reconnecting)
+	{
+		m_reconnecting = true;
+		m_reconnectAttempts = 0;
+		// What changes from now on was done offline. (LMMS does not mark every change as "modified", e.g. moving
+		// a clip, so the project itself is compared when we are back.)
+		m_unsentAtLoss = syncStatus() == SyncStatus::Sending;
+		m_offlineSnapshot = projectSnapshot();
+		log(QString{"connection lost: reconnecting%1"}.arg(m_unsentAtLoss ? " (own changes not sent yet)" : ""));
+		Engine::getSong()->clearModified();
+	}
+	++m_reconnectAttempts;
+	// Everything of the lost session goes (it is loaded again from the server); the intent to come back stays
+	const QString host = m_host, user = m_user, project = m_project, color = m_color;
+	const quint16 port = m_port;
+	disconnectFromServer();
+	setState(State::Reconnecting);
+	QTimer::singleShot(m_reconnectAttempts == 1 ? 1000 : 3000, this, [=, this] {
+		if (m_reconnecting && m_state == State::Reconnecting)
+		{
+			connectToServer(host, port, user, project, JoinMode::Open, color);
+		}
+	});
+}
+
+
+QString CollabSession::projectSnapshot()
+{
+	QTemporaryDir dir;
+	const QString file = dir.filePath("snapshot.mmp");
+	QFile f{file};
+	QDomDocument doc;
+	if (!dir.isValid() || !Engine::getSong()->saveProjectFile(file) || !f.open(QIODevice::ReadOnly)
+		|| !doc.setContent(&f))
+	{
+		return {};
+	}
+	// Only what is shared: window geometry and the like are private (decision D9)
+	const auto stripWindows = [](auto& self, QDomElement e) -> void {
+		for (const char* attribute : {"x", "y", "width", "height", "visible", "maximized"})
+		{
+			e.removeAttribute(attribute);
+		}
+		for (QDomElement c = e.firstChildElement(); !c.isNull(); c = c.nextSiblingElement()) { self(self, c); }
+	};
+	const QDomElement song = doc.documentElement().firstChildElement("song");
+	QStringList parts;
+	{
+		QString head; // tempo, master volume...
+		QTextStream stream{&head};
+		doc.documentElement().firstChildElement("head").save(stream, 0);
+		parts.append(head);
+	}
+	for (QDomElement e = song.firstChildElement(); !e.isNull(); e = e.nextSiblingElement())
+	{
+		const QString tag = e.tagName();
+		if (tag == "timeline" || tag == "pianoroll" || tag == "automationeditor") { continue; }
+		stripWindows(stripWindows, e);
+		QString text;
+		QTextStream stream{&text};
+		e.save(stream, 0);
+		parts.append(text);
+	}
+	return parts.join('\n');
+}
+
+
+bool CollabSession::keepOfflineChanges()
+{
+	m_reconnecting = false;
+	const bool changed = m_unsentAtLoss || Engine::getSong()->isModified() || projectSnapshot() != m_offlineSnapshot;
+	m_offlineSnapshot.clear();
+	m_hadOfflineChanges = changed;
+	log(QString{"offline changes: %1"}.arg(changed ? "yes" : "no"));
+	if (!changed) { return true; }
+	auto gui = gui::getGUI();
+	if (!gui) { return true; }
+	QMessageBox box{QMessageBox::Question, tr("Back online"),
+		tr("You changed the project while the connection was lost. The project continues as it is on the server; "
+			"your version can be kept as a file of its own (to copy parts of it back, for example)."),
+		QMessageBox::NoButton, gui->mainWindow()};
+	QPushButton* save = box.addButton(tr("Save my version as a file..."), QMessageBox::AcceptRole);
+	box.addButton(tr("Discard my changes"), QMessageBox::DestructiveRole);
+	box.exec();
+	if (box.clickedButton() != save) { return true; }
+	const QString file = QFileDialog::getSaveFileName(gui->mainWindow(), tr("Save my version"),
+		ConfigManager::inst()->userProjectsDir() + m_project + " (offline).mmpz", tr("LMMS projects (*.mmpz *.mmp)"));
+	if (!file.isEmpty() && !Engine::getSong()->saveProjectFile(file))
+	{
+		QMessageBox::warning(gui->mainWindow(), tr("Back online"), tr("Could not save %1").arg(file));
+	}
+	return true;
+}
+
+
 void CollabSession::setState(State state)
 {
 	if (m_state == state) { return; }
@@ -281,6 +415,7 @@ void CollabSession::setState(State state)
 void CollabSession::fail(const QString& message)
 {
 	const bool wasActive = m_state != State::Disconnected;
+	m_reconnecting = false; // e.g. the server answered, but the project is gone: trying again would not help
 	disconnectFromServer();
 	if (wasActive) { emit errorOccurred(message); }
 }
@@ -423,6 +558,11 @@ void CollabSession::sendPresence(const QJsonObject& presence)
 
 void CollabSession::handleJoined(const QJsonObject& message)
 {
+	if (m_reconnecting)
+	{
+		log(QString{"reconnected after %1 attempt(s)"}.arg(m_reconnectAttempts));
+		keepOfflineChanges();
+	}
 	m_seq = message.value("seq").toInteger();
 	m_savedSeq = message.value("savedSeq").toInteger();
 	m_savedAt = m_savedSeq >= m_seq ? QDateTime::currentDateTime() : QDateTime{};

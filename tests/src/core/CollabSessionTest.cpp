@@ -1321,6 +1321,46 @@ private slots:
 		QVERIFY(found);
 	}
 
+	// ---- M7b: reconnecting ----
+
+	void testReconnect()
+	{
+		auto session = CollabSession::instance();
+		QVERIFY(session->waitUntilSaved(3000));
+		// The server goes away: the session keeps trying, and is back once the server is
+		m_server.kill();
+		m_server.waitForFinished(3000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Reconnecting, 5000);
+		// Meanwhile a clip is moved (LMMS does not mark that as "modified"): it counts as an offline change, and
+		// the project continues as it is on the server
+		const auto firstClip = [] () -> std::pair<int, Clip*> {
+			const auto& tracks = Engine::getSong()->tracks();
+			for (int t = 0; t < static_cast<int>(tracks.size()); ++t)
+			{
+				if (tracks[t]->numOfClips() > 0) { return {t, tracks[t]->getClip(0)}; }
+			}
+			return {-1, nullptr};
+		};
+		auto [trackIndex, clip] = firstClip();
+		QVERIFY(clip);
+		const TimePos position = clip->startPosition();
+		clip->movePosition(position + TimePos::ticksPerBar());
+		m_server.start(COLLAB_SERVER_EXE, {"--port", QString::number(m_port), "--data", m_dataDir.path()});
+		QVERIFY(m_server.waitForStarted(5000));
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 15000);
+		QCOMPARE(session->projectName(), QString{"session-test"});
+		QVERIFY(session->hadOfflineChanges());
+		auto [trackAfter, clipAfter] = firstClip();
+		QCOMPARE(trackAfter, trackIndex);
+		QVERIFY(clipAfter);
+		QCOMPARE(clipAfter->startPosition().getTicks(), position.getTicks());
+		// "Disconnect" ends it for good: no reconnecting afterwards
+		session->leave();
+		QCOMPARE(session->state(), CollabSession::State::Disconnected);
+		settle(1500);
+		QCOMPARE(session->state(), CollabSession::State::Disconnected);
+	}
+
 private:
 	QString m_newTrackXml;
 

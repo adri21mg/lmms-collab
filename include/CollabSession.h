@@ -108,7 +108,8 @@ public:
 		Disconnected,
 		Connecting,
 		Joining,
-		Live
+		Live,
+		Reconnecting //!< the connection was lost; trying again every few seconds
 	};
 
 	//! Whether this user's work is safe on the server
@@ -134,6 +135,14 @@ public:
 	void sendPresence(const QJsonObject& presence);
 	QString userColor() const { return m_color; }
 	void disconnectFromServer();
+	//! Leaves the session for good (also stops reconnecting)
+	void leave();
+	//! Asks the server to save and waits up to @p timeoutMs until it did; false if it did not (or not connected)
+	bool waitUntilSaved(int timeoutMs);
+	//! Whether the last lost connection came back with changes made offline
+	bool hadOfflineChanges() const { return m_hadOfflineChanges; }
+	//! The connection was lost and the session is trying to get it back (through every attempt's states)
+	bool isReconnecting() const { return m_reconnecting; }
 
 	State state() const { return m_state; }
 	QString projectName() const { return m_project; }
@@ -253,6 +262,12 @@ private:
 	void onReadyRead();
 	void handleMessage(const QJsonObject& message);
 	void handleJoined(const QJsonObject& message);
+	//! The connection was lost in a session: try again until the user leaves
+	void startReconnecting();
+	//! Back after a lost connection: what this user changed meanwhile is offered as a file of its own (D5)
+	bool keepOfflineChanges();
+	//! The shared content of the song (no window positions), to compare it before and after a lost connection
+	static QString projectSnapshot();
 	//! Loads the joined project (after its shared files are here) and goes live
 	void finishJoin(const QJsonObject& message);
 	//! Transactions are applied strictly in server order, but only while no mouse button is held: an
@@ -514,6 +529,13 @@ private:
 	qint64 m_downloadDone = 0;
 	std::optional<QJsonObject> m_pendingJoin;    //!< joined message waiting for its shared files
 	bool m_reading = false;                      //!< in onReadyRead() (dialogs process events meanwhile)
+	QString m_host;
+	quint16 m_port = 0;
+	bool m_reconnecting = false;                 //!< the session was lost; connections are attempts to get it back
+	int m_reconnectAttempts = 0;
+	QString m_offlineSnapshot;                   //!< the project when the connection was lost (to see what changed)
+	bool m_unsentAtLoss = false;
+	bool m_hadOfflineChanges = false;                 //!< own changes had not reached the server when it was lost
 	bool m_sharedFilesRefresh = false;           //!< a refresh of the "Shared project" tab is scheduled
 	QSet<collab_id_t> m_forcePluginCheck;        //!< instruments whose state must be compared at the next flush
 	QSet<collab_id_t> m_editedTracks;  //!< tracks with open plugin windows at the last check
