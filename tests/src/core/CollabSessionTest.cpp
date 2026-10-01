@@ -22,6 +22,7 @@
  *
  */
 
+#include <QCryptographicHash>
 #include <QDomDocument>
 #include <QJsonArray>
 #include <QTextStream>
@@ -50,6 +51,9 @@
 #include "Note.h"
 #include "PatternStore.h"
 #include "PatternTrack.h"
+#include "PathUtil.h"
+#include "SampleClip.h"
+#include "SampleTrack.h"
 #include "Song.h"
 
 using namespace lmms;
@@ -84,6 +88,11 @@ public:
 			QByteArray payload;
 			while (m_decoder.next(t, payload))
 			{
+				if (t == proto::FrameType::Binary)
+				{
+					m_binary.append(payload);
+					continue;
+				}
 				const auto msg = proto::parseMessage(payload);
 				if (msg && (type.isEmpty() || msg->value("t").toString() == type)) { return *msg; }
 			}
@@ -140,7 +149,36 @@ public:
 
 	QString clientId() const { return m_clientId; }
 
+	//! Downloads a shared file (asset.get); empty on failure
+	QByteArray download(const QString& hash)
+	{
+		m_binary.clear();
+		send({{"t", "asset.get"}, {"hash", hash}});
+		const auto header = next("asset.data");
+		const qint64 size = header.value("size").toInteger();
+		QByteArray data;
+		QElapsedTimer timer;
+		timer.start();
+		while (data.size() < size && timer.elapsed() < 5000)
+		{
+			while (!m_binary.isEmpty()) { data.append(m_binary.takeFirst().mid(proto::AssetHashSize)); }
+			if (data.size() < size) { next("__none__", 20); }
+		}
+		return data;
+	}
+
+	//! Uploads a shared file; returns the path the server gave it
+	QString upload(const QByteArray& data, const QString& name)
+	{
+		const QByteArray hash = QCryptographicHash::hash(data, QCryptographicHash::Sha256);
+		send({{"t", "asset.put"}, {"hash", QString::fromLatin1(hash.toHex())}, {"size", data.size()}, {"name", name}});
+		m_socket.write(proto::encodeBinaryFrame(hash, data));
+		m_socket.flush();
+		return next("asset.stored").value("path").toString();
+	}
+
 private:
+	QList<QByteArray> m_binary;
 	QTcpSocket m_socket;
 	proto::FrameDecoder m_decoder;
 	QString m_clientId;
@@ -1123,6 +1161,133 @@ private slots:
 		QCOMPARE(m_peer.nextForeignOp("param.link").value("controller").toString(), QString{});
 		song->removeController(lfo);
 		QCOMPARE(m_peer.nextForeignOp("controller.remove").value("id").toString(), lfoId);
+	}
+
+	// ---- M6a: shared files ----
+
+	//! A small valid WAV file (16-bit mono), different for each seed
+	static QByteArray wav(int seed)
+	{
+		QByteArray data;
+		auto u32 = [&data](quint32 v) { for (int i = 0; i < 4; ++i) { data.append(static_cast<char>((v >> (8 * i)) & 0xff)); } };
+		auto u16 = [&data](quint16 v) { data.append(static_cast<char>(v & 0xff)); data.append(static_cast<char>(v >> 8)); };
+		const int samples = 2000;
+		data.append("RIFF"); u32(36 + samples * 2); data.append("WAVEfmt "); u32(16); u16(1); u16(1); u32(44100);
+		u32(88200); u16(2); u16(16); data.append("data"); u32(samples * 2);
+		for (int i = 0; i < samples; ++i) { u16(static_cast<quint16>((i * seed * 37) & 0x7fff)); }
+		return data;
+	}
+
+	void testSharedFiles()
+	{
+		m_peer.drain();
+		const QString libraryDir = m_dataDir.filePath("workspace/collab/session-test/library/");
+		QCOMPARE(PathUtil::sharedLocation(), QDir::cleanPath(libraryDir) + "/");
+
+		// A sample only this computer has: shared first (no GUI: without asking), then the new track names it
+		const QByteArray kick = wav(3);
+		const QString kickFile = m_dataDir.filePath("my-kick.wav");
+		QFile out{kickFile};
+		QVERIFY(out.open(QIODevice::WriteOnly));
+		out.write(kick);
+		out.close();
+		auto track = dynamic_cast<SampleTrack*>(Track::create(Track::Type::Sample, Engine::getSong()));
+		auto clip = dynamic_cast<SampleClip*>(track->createClip(TimePos{0}));
+		clip->setSampleFile(kickFile);
+		const auto added = m_peer.nextForeignOp("library.add", 5000);
+		QCOMPARE(added.value("path").toString(), QString{"my-kick.wav"});
+		const QString trackXml = m_peer.nextForeignOp("track.add").value("xml").toString();
+		QVERIFY2(trackXml.contains("shared:my-kick.wav") && !trackXml.contains(kickFile), qPrintable(trackXml));
+		QCOMPARE(clip->sampleFile(), QString{"shared:my-kick.wav"});
+		QCOMPARE(m_peer.download(added.value("hash").toString()), kick);
+
+		// A file the peer shares is downloaded here
+		const QByteArray snare = wav(5);
+		const QString snarePath = m_peer.upload(snare, "snare.wav");
+		QCOMPARE(snarePath, QString{"snare.wav"});
+		const QString snareHash = QString::fromLatin1(QCryptographicHash::hash(snare, QCryptographicHash::Sha256).toHex());
+		m_peer.sendOps({QJsonObject{{"op", "library.add"}, {"path", snarePath}, {"hash", snareHash}, {"size", snare.size()}}});
+		QTRY_COMPARE_WITH_TIMEOUT(QFileInfo{libraryDir + "snare.wav"}.size(), static_cast<qint64>(snare.size()), 5000);
+		QFile in{libraryDir + "snare.wav"};
+		QVERIFY(in.open(QIODevice::ReadOnly));
+		QCOMPARE(in.readAll(), snare);
+
+		// A local file with the same content as a shared one is simply the shared one: nothing uploaded
+		m_peer.drain();
+		const QString copy = m_dataDir.filePath("same-snare.wav");
+		QFile copyOut{copy};
+		QVERIFY(copyOut.open(QIODevice::WriteOnly));
+		copyOut.write(snare);
+		copyOut.close();
+		auto second = dynamic_cast<SampleClip*>(track->createClip(TimePos{192}));
+		second->setSampleFile(copy);
+		const QString clipXml = m_peer.nextForeignOp("clip.add").value("xml").toString();
+		QVERIFY2(clipXml.contains("shared:snare.wav"), qPrintable(clipXml));
+		QVERIFY2(m_peer.nextForeignOp("library.add", 500).isEmpty(), "the same content is not shared twice");
+
+		// Joining again without the shared files: they are downloaded before the project is loaded
+		auto session = CollabSession::instance();
+		session->disconnectFromServer();
+		QDir{libraryDir}.removeRecursively();
+		session->connectToServer("127.0.0.1", m_port, "Adri", "session-test", CollabSession::JoinMode::Open);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 5000);
+		QCOMPARE(QFileInfo{libraryDir + "snare.wav"}.size(), static_cast<qint64>(snare.size()));
+		QCOMPARE(QFileInfo{libraryDir + "my-kick.wav"}.size(), static_cast<qint64>(kick.size()));
+		bool kickLoaded = false;
+		for (Track* t : Engine::getSong()->tracks())
+		{
+			for (Clip* c : t->getClips())
+			{
+				auto sample = dynamic_cast<SampleClip*>(c);
+				if (sample && sample->sampleFile() == "shared:my-kick.wav") { kickLoaded = true; }
+			}
+		}
+		QVERIFY2(kickLoaded, "the project's clips use the downloaded file");
+	}
+
+	void testEditsWhileJoining()
+	{
+		// While this client downloads the project's files to join, the peer goes on: a new track, a new shared
+		// file and a clip using it. All of it is applied once the download is done, in order.
+		auto session = CollabSession::instance();
+		const QString libraryDir = m_dataDir.filePath("workspace/collab/session-test/library/");
+		session->disconnectFromServer();
+		QByteArray big(40 * 1024 * 1024, '\0');
+		for (int i = 0; i < big.size(); i += 4096) { big[i] = static_cast<char>(i / 4096); }
+		const QByteArray header = wav(7).left(44);
+		big.replace(0, 44, header);
+		const QString bigHash = QString::fromLatin1(QCryptographicHash::hash(big, QCryptographicHash::Sha256).toHex());
+		QCOMPARE(m_peer.upload(big, "big.wav"), QString{"big.wav"});
+		m_peer.sendOps({QJsonObject{{"op", "library.add"}, {"path", "big.wav"}, {"hash", bigHash}, {"size", big.size()}}});
+		settle(300);
+		QDir{libraryDir}.removeRecursively();
+
+		session->connectToServer("127.0.0.1", m_port, "Adri", "session-test", CollabSession::JoinMode::Open);
+		// Wait until the download has started, then edit without letting it go on meanwhile
+		QElapsedTimer timer;
+		timer.start();
+		auto downloading = [&] { return !QDir{libraryDir}.entryList({".part-*"}, QDir::Files | QDir::Hidden).isEmpty(); };
+		while (!downloading() && timer.elapsed() < 5000) { QCoreApplication::processEvents(QEventLoop::AllEvents, 5); }
+		QVERIFY2(downloading(), "the download started");
+		QVERIFY(session->state() != CollabSession::State::Live);
+
+		const QByteArray late = wav(9);
+		const QString lateHash = QString::fromLatin1(QCryptographicHash::hash(late, QCryptographicHash::Sha256).toHex());
+		QCOMPARE(m_peer.upload(late, "late.wav"), QString{"late.wav"});
+		const QString trackId = "0000000000400001";
+		m_peer.sendOps({QJsonObject{{"op", "library.add"}, {"path", "late.wav"}, {"hash", lateHash}, {"size", late.size()}},
+			QJsonObject{{"op", "track.add"}, {"container", "song"}, {"index", -1}, {"xml",
+				QString{R"(<track type="2" name="Late" cid="%1" muted="0" solo="0"><sampletrack vol="100" pan="0"/>)"
+					R"(<sampleclip cid="0000000000400002" pos="0" len="192" muted="0" src="shared:late.wav" off="0"/></track>)"}
+					.arg(trackId)}}});
+
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 15000);
+		QCOMPARE(QFileInfo{libraryDir + "big.wav"}.size(), static_cast<qint64>(big.size()));
+		QTRY_VERIFY(findTrack(idFromString(trackId)) != nullptr);
+		QTRY_COMPARE_WITH_TIMEOUT(QFileInfo{libraryDir + "late.wav"}.size(), static_cast<qint64>(late.size()), 5000);
+		auto clip = dynamic_cast<SampleClip*>(findTrack(idFromString(trackId))->getClips().front());
+		QCOMPARE(clip->sampleFile(), QString{"shared:late.wav"});
+		QVERIFY2(clip->sample().sampleSize() > 1000, "the clip plays the real file, not the placeholder");
 	}
 
 private:

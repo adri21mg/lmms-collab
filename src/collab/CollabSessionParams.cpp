@@ -700,7 +700,9 @@ void CollabSession::flushPlugins()
 			}
 			// While knobs move, the XML differs because of them; they are synchronized on their own
 			const bool quiet = !state.lastParamActivity.isValid() || state.lastParamActivity.elapsed() >= 1000;
-			const bool compareState = checkState.contains(id) && quiet;
+			// Also right after one of its files became shared (its instrument now names the shared file)
+			const bool compareState = (checkState.contains(id) || m_forcePluginCheck.contains(id)) && quiet;
+			if (compareState) { m_forcePluginCheck.remove(id); }
 			// The other side's knob changes also change the XML, but they are already synchronized. Our own
 			// knob changes are too, yet they may hide a change of state (a sample loaded, a preset...): the
 			// whole state is then sent, and the other side only reloads what really differs.
@@ -717,9 +719,11 @@ void CollabSession::flushPlugins()
 					send = xml != state.instrumentXml && !onlyRemoteKnobs;
 					if (!send) { state.instrumentXml = xml; }
 				}
+				if (send && xml.isEmpty()) { xml = instrumentXml(instrumentTrack); }
+				// Files only this computer has are shared first; until then the others keep the old instrument
+				if (send && !readyToSend(xml)) { send = false; }
 				if (send)
 				{
-					if (xml.isEmpty()) { xml = instrumentXml(instrumentTrack); }
 					ops.append(QJsonObject{{"op", proto::op::InstrumentSet}, {"track", proto::idString(id)}, {"xml", xml}});
 					state.instrumentIdentity = identity;
 					state.instrumentXml = xml;

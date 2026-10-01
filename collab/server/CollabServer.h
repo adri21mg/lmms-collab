@@ -30,6 +30,9 @@
 
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QHash>
+#include <QJsonArray>
 #include <QObject>
 #include <QTimer>
 
@@ -59,10 +62,25 @@ public:
 private:
 	struct Project
 	{
+		struct Asset
+		{
+			QString path;  //!< inside the project's library folder ("shared:<path>" in the project)
+			qint64 size = 0;
+		};
 		QString name;
 		ProjectState state;
 		qint64 seq = 0;
 		bool dirty = false;
+		QHash<QString, Asset> library; //!< shared files by SHA-256
+	};
+
+	//! A file being uploaded by a client
+	struct Upload
+	{
+		QString name;
+		qint64 size = 0;
+		qint64 received = 0;
+		std::unique_ptr<QFile> file;
 	};
 
 	struct Client
@@ -76,6 +94,7 @@ private:
 		QJsonObject presence;          //!< last presence, for users who join later (never stored on disk)
 		QElapsedTimer presenceForwarded;
 		bool presencePending = false;
+		std::map<QString, Upload> uploads; //!< by SHA-256
 	};
 
 	void onNewConnection();
@@ -86,6 +105,14 @@ private:
 	void handleOpen(Client& client, const QJsonObject& message);
 	void handleTx(Client& client, const QJsonObject& message);
 	void handlePresence(Client& client, const QJsonObject& message);
+	void handleAssetPut(Client& client, const QJsonObject& message);
+	void handleAssetGet(Client& client, const QJsonObject& message);
+	//! A part of an uploaded file
+	void handleBinary(Client& client, const QByteArray& payload);
+	void dropUploads(Client& client);
+	//! The shared files as sent in joined
+	static QJsonArray libraryList(const Project& project);
+	bool saveLibrary(const Project& project);
 	//! Sends the presence of everybody else in the client's project to a client that just joined
 	void sendPresenceOfOthers(Client& client);
 

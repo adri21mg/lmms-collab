@@ -670,6 +670,11 @@ bool ProjectState::applyClipOp(const QString& type, const QJsonObject& op)
 		const QJsonObject values = op.value("v").toObject();
 		if (values.isEmpty() || !proto::validFields(values, proto::clipFields())) { return false; }
 		if (values.contains("steps") && clip.tagName() != "midiclip") { return false; }
+		if (values.contains("src"))
+		{
+			if (clip.tagName() != "sampleclip") { return false; }
+			clip.removeAttribute("data"); // the embedded sample it had before, if any
+		}
 		if (values.contains("pos") && inPatternEditor) { return false; } // the position is the pattern
 		setFields(clip, values, proto::clipFields());
 		if (clip.tagName() == "automationclip" && values.contains("muted"))

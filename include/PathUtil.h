@@ -36,7 +36,11 @@ namespace lmms::PathUtil
 {
 	enum class Base { Absolute, ProjectDir, FactoryProjects, FactorySample, UserSample, UserVST, Preset,
 		FactoryPresets, UserLADSPA, DefaultLADSPA, UserSoundfont, DefaultSoundfont, UserGIG, DefaultGIG,
-		LocalDir };
+		LocalDir, Shared };
+
+	//! Folder of the shared files of the collaboration project ("shared:" paths); empty when none
+	void LMMS_EXPORT setSharedLocation(const QString& dir);
+	QString LMMS_EXPORT sharedLocation();
 
 	//! Return the directory associated with a given base as a QString
 	//! Optionally, if a pointer to boolean is given the method will

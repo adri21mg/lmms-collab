@@ -32,13 +32,21 @@
 //     open    {project}                              join an existing shared project
 //     tx      {ctx, ops[]}                           one local edit gesture (client-local counter ctx)
 //     presence {cursor, play}                        where this user is; never stored (see sanitizePresence)
+//     asset.put {hash, size, name}                   upload of a shared file (M6a): binary frames follow
+//     asset.get {hash}                               download of a shared file
 //   server -> client
 //     welcome {proto, clientId}
 //     joined  {project, seq, mmp?}                   mmp is omitted for the creator (it already has the song)
 //     tx      {seq, clientId, ctx, ops[]}            accepted transaction, sent to every client incl. sender
 //     presence {clientId, user, color, cursor, play} another user's presence, or {clientId, gone:true}
+//     asset.stored {hash, path}                      an upload is complete (or the file was already there)
+//     asset.data {hash, size}                        a download: binary frames follow
+//     asset.error {hash, message}
 //     error   {message}
-// hello also carries the user's color ("#rrggbb").
+// hello also carries the user's color ("#rrggbb"). joined also carries the shared files: library [{path, hash, size}].
+// Binary frames (type 1) carry file data: [32 bytes SHA-256 of the whole file][up to AssetChunkSize bytes].
+// Shared files are named "shared:<path>" in the project, like LMMS' own "factorysample:..." paths; every client
+// keeps them in its own folder. Files are identified by their SHA-256 (the same file is stored once).
 //
 // Ops inside a tx (field names match LMMS' XML attributes):
 //     {op:"note.add",    clip, id, v:{key,pos,len,vol,pan,type}}   all fields required
@@ -51,7 +59,8 @@
 //     {op:"track.order", container:"song", ids:[...]}              order of the shared tracks
 //     {op:"clip.add",    track, xml}                               complete clip element (with its notes)
 //     {op:"clip.remove", id}
-//     {op:"clip.set",    id, v:{pos,len,off,name,color,muted,autoresize,steps}}  any subset
+//     {op:"clip.set",    id, v:{pos,len,off,name,color,muted,autoresize,steps,src}}  any subset
+//                                                                   (src: the file of a sample clip)
 //     {op:"pattern.add", xml, clips:[{track, xml}]}                new pattern track + its clip in every
 //                                                                   Pattern Editor track; appended as the last pattern
 //     {op:"pattern.remove", id}
@@ -91,6 +100,7 @@
 //     {op:"controller.remove", id}
 //     {op:"controller.set",    id, v:{name}}                       (a Peak Controller: "ref" instead of "id")
 //     {op:"controllers.state", xml}                                the whole <controllers>, stored by the server
+//     {op:"library.add", path, hash, size}                          a file uploaded by the sender is now shared
 //     {op:"param.link", owner, path, controller}                   a parameter connected to a controller (its id or
 //         "p:..." name), or disconnected (""). param.set with a controller as owner: path "k:<n>" = its knobs
 // Tracks live in the "song" container (Song Editor) or the "patternstore" container (Pattern Editor).
@@ -134,7 +144,25 @@ inline constexpr auto Joined = "joined";
 inline constexpr auto Tx = "tx";
 inline constexpr auto Presence = "presence";
 inline constexpr auto Error = "error";
+inline constexpr auto AssetPut = "asset.put";
+inline constexpr auto AssetGet = "asset.get";
+inline constexpr auto AssetStored = "asset.stored";
+inline constexpr auto AssetData = "asset.data";
+inline constexpr auto AssetError = "asset.error";
 } // namespace msg
+
+//! Largest shared file accepted
+inline constexpr qint64 MaxAssetSize = 200ll * 1024 * 1024;
+//! Largest data part of one binary frame
+inline constexpr int AssetChunkSize = 256 * 1024;
+//! Size of the SHA-256 at the start of every binary frame
+inline constexpr int AssetHashSize = 32;
+//! SHA-256 as 64 lowercase hex digits
+bool isValidHash(const QString& hash);
+//! A safe file name for a shared file (no folders, a known audio/instrument file type), or "" if unusable
+QString sanitizeAssetName(const QString& name);
+//! Encodes one binary frame: SHA-256 of the file + a part of its data
+QByteArray encodeBinaryFrame(const QByteArray& hash, const QByteArray& data);
 
 /**
  * Presence (decision M3): ephemeral, relayed by the server, never stored, never undone.
@@ -192,6 +220,7 @@ inline constexpr auto ControllerRemove = "controller.remove";
 inline constexpr auto ControllerSet = "controller.set";
 inline constexpr auto ControllersState = "controllers.state";
 inline constexpr auto ParamLink = "param.link";
+inline constexpr auto LibraryAdd = "library.add";
 } // namespace op
 
 //! Id of the n-th controller in a project saved without controller ids.

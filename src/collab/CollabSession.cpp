@@ -35,7 +35,9 @@
 #include <QJsonDocument>
 #include <QMdiArea>
 #include <QMdiSubWindow>
+#include <QProgressDialog>
 #include <QPointer>
+#include <QScopeGuard>
 #include <QTime>
 #include <QTcpSocket>
 #include <QTemporaryDir>
@@ -55,6 +57,7 @@
 #include "PatternEditor.h"
 #include "PatternStore.h"
 #include "PatternTrack.h"
+#include "SampleClip.h"
 #include "SampleTrack.h"
 #include "ProjectNotes.h"
 #include "Song.h"
@@ -192,6 +195,7 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 	const QString logDir = ConfigManager::inst()->workingDir() + "collab/";
 	QDir{}.mkpath(logDir);
 	// The previous session's log is kept: it matters most after a crash, and LMMS is then started again
+	m_log.reset(); // closed, or Windows does not rename it
 	QFile::remove(logDir + "session.previous.log");
 	QFile::rename(logDir + "session.log", logDir + "session.previous.log");
 	m_log = std::make_unique<QFile>(logDir + "session.log");
@@ -236,6 +240,19 @@ void CollabSession::disconnectFromServer()
 	m_txQueue.clear();
 	m_txQueueTimer->stop();
 	m_decoder = proto::FrameDecoder{};
+	// Shared files on their way
+	m_downloadQueue.clear();
+	m_downloading.clear();
+	m_downloadFile.reset();
+	m_pendingJoin.reset();
+	m_uploads.clear();
+	m_shareQueue.clear();
+	m_unresolvedAutomation.clear();
+	m_linkBaseline.clear();
+	m_pendingLinks.clear();
+	m_unresolvedLinks.clear();
+	m_forcePluginCheck.clear();
+	if (m_downloadProgress) { m_downloadProgress->close(); }
 	emit presenceCleared();
 	if (m_socket)
 	{
@@ -298,12 +315,27 @@ void CollabSession::log(const QString& line)
 
 void CollabSession::onReadyRead()
 {
-	m_decoder.append(m_socket->readAll());
+	// Dialogs and progress bars shown while handling a message process events, which would call this again
+	// in the middle of a message: data that arrives meanwhile is read by the loop below instead
+	if (m_reading) { return; }
+	m_reading = true;
+	const auto done = qScopeGuard([this] { m_reading = false; });
 	proto::FrameType type;
 	QByteArray payload;
-	while (m_socket && m_decoder.next(type, payload))
+	while (m_socket)
 	{
-		const auto message = type == proto::FrameType::Json ? proto::parseMessage(payload) : std::nullopt;
+		if (m_socket->bytesAvailable() > 0)
+		{
+			m_decoder.append(m_socket->readAll());
+			continue;
+		}
+		if (!m_decoder.next(type, payload)) { break; }
+		if (type == proto::FrameType::Binary)
+		{
+			handleBinary(payload); // a part of a shared file
+			continue;
+		}
+		const auto message = proto::parseMessage(payload);
 		if (!message) { return fail(tr("The server sent an invalid message.")); }
 		handleMessage(*message);
 	}
@@ -347,6 +379,7 @@ void CollabSession::handleMessage(const QJsonObject& message)
 		// Presence never touches the project, so it is not queued behind mouse gestures
 		if (m_state == State::Live) { emit presenceReceived(message); }
 	}
+	else if (t.startsWith("asset.")) { handleAssetMessage(message); }
 	else if (t == proto::msg::Error) { fail(message.value("message").toString()); }
 }
 
@@ -367,6 +400,23 @@ void CollabSession::sendPresence(const QJsonObject& presence)
 void CollabSession::handleJoined(const QJsonObject& message)
 {
 	m_seq = message.value("seq").toInteger();
+	// Shared files: "shared:" paths of the project resolve to this project's library folder
+	setLibrary(message.value("library").toArray());
+	const QStringList missing = message.contains("mmp") ? missingFiles() : QStringList{};
+	if (missing.isEmpty()) { return finishJoin(message); }
+	// The project waits (and so do the transactions after it) until its shared files are here
+	m_pendingJoin = message;
+	if (!downloadMissing(missing))
+	{
+		m_pendingJoin.reset();
+		QTimer::singleShot(0, this, [this] { disconnectFromServer(); });
+	}
+}
+
+
+void CollabSession::finishJoin(const QJsonObject& message)
+{
+	m_pendingJoin.reset();
 	if (message.contains("mmp"))
 	{
 		// Keep a local working copy of the shared project in this instance's workspace
@@ -425,6 +475,8 @@ void CollabSession::handleJoined(const QJsonObject& message)
 		}
 	}
 	setState(State::Live);
+	if (!message.contains("mmp")) { shareProjectFiles(); } // we created it: files only we have must be shared
+	processTxQueue(); // what happened while the files were downloading
 }
 
 
@@ -491,7 +543,7 @@ void CollabSession::flushAll()
 
 void CollabSession::processTxQueue()
 {
-	if (m_state != State::Live && m_state != State::Joining) { return; }
+	if ((m_state != State::Live && m_state != State::Joining) || m_pendingJoin) { return; }
 	const auto gui = qobject_cast<QGuiApplication*>(QCoreApplication::instance());
 	if (gui && QGuiApplication::mouseButtons() != Qt::NoButton)
 	{
@@ -567,6 +619,11 @@ void CollabSession::applyTx(const QJsonObject& message)
 		{
 			flushNoteGroup();
 			applyRemoteLink(op, m_seq);
+			continue;
+		}
+		if (type == proto::op::LibraryAdd)
+		{
+			addLibraryFile(op.value("path").toString(), op.value("hash").toString(), op.value("size").toInteger(), true);
 			continue;
 		}
 		if (type == proto::op::TrackState || type == proto::op::MixerState || type == proto::op::ControllersState)
@@ -859,6 +916,7 @@ QJsonObject CollabSession::clipFields(const Clip* clip)
 		{"color", clip->color() ? clip->color()->name() : QString{}}, {"muted", clip->isMuted()},
 		{"autoresize", clip->getAutoResize()}};
 	if (auto midiClip = dynamic_cast<const MidiClip*>(clip)) { fields.insert("steps", midiClip->stepCount()); }
+	if (auto sampleClip = dynamic_cast<const SampleClip*>(clip)) { fields.insert("src", sampleClip->sampleFile()); }
 	// In the Pattern Editor the position is the pattern the clip belongs to, not something to edit
 	if (clip->getTrack() && clip->getTrack()->trackContainer() == Engine::patternStore()) { fields.remove("pos"); }
 	return fields;
@@ -898,6 +956,17 @@ void CollabSession::applyTrackFields(Track* track, const QJsonObject& fields)
 
 void CollabSession::applyClipFields(Clip* clip, const QJsonObject& fields)
 {
+	if (fields.contains("src") && dynamic_cast<SampleClip*>(clip))
+	{
+		// Through its XML, so the clip keeps its length and offset (setSampleFile() resets them)
+		QDomDocument doc;
+		if (doc.setContent(serialize(clip)))
+		{
+			doc.documentElement().setAttribute("src", fields.value("src").toString());
+			doc.documentElement().removeAttribute("data");
+			clip->restoreState(doc.documentElement());
+		}
+	}
 	if (fields.contains("autoresize")) { clip->setAutoResize(fields.value("autoresize").toBool()); }
 	if (fields.contains("steps"))
 	{
@@ -1136,6 +1205,26 @@ void CollabSession::flushStructure()
 	flushControllers(current, ops, ctx);
 	flushMixer(current, ops, ctx);
 
+	// New tracks that use files only this computer has wait until those are shared: out of this round
+	for (const TrackContainer* container : {static_cast<TrackContainer*>(Engine::getSong()),
+		static_cast<TrackContainer*>(Engine::patternStore())})
+	{
+		for (Track* track : container->tracks())
+		{
+			const collab_id_t id = track->collabId();
+			if (!current.tracks.contains(id) || !isNew(id) || readyToSend(serialize(track))) { continue; }
+			current.tracks.remove(id);
+			current.trackTypes.remove(id);
+			current.order.removeAll(id);
+			current.patternOrder.removeAll(id);
+			current.patternEditorTracks.remove(id);
+			for (auto it = current.clips.begin(); it != current.clips.end();)
+			{
+				it = it->track == id ? current.clips.erase(it) : std::next(it);
+			}
+		}
+	}
+
 	// New Song Editor tracks are sent complete (instrument, settings, clips); a new pattern also carries
 	// its content: its clip in every Pattern Editor track that is already shared
 	for (Track* track : Engine::getSong()->tracks())
@@ -1168,6 +1257,21 @@ void CollabSession::flushStructure()
 		if (!current.tracks.contains(id) || !isNew(id)) { continue; }
 		ops.append(QJsonObject{{"op", proto::op::TrackAdd}, {"container", proto::PatternContainer},
 			{"index", -1}, {"xml", serialize(track)}});
+	}
+
+	// Sample clips with a file only this computer has wait until it is shared
+	for (auto it = current.clips.begin(); it != current.clips.end();)
+	{
+		const auto old = m_structure.clips.constFind(it.key());
+		const bool changedFile = it->fields.contains("src")
+			&& (old == m_structure.clips.cend() || old->fields.value("src") != it->fields.value("src"));
+		if (!changedFile || isNew(it->track) || readyToSend(serialize(findClip(it.key())))) { ++it; continue; }
+		if (old == m_structure.clips.cend()) { it = current.clips.erase(it); }
+		else
+		{
+			it->fields.insert("src", old->fields.value("src"));
+			++it;
+		}
 	}
 
 	// Clips: Song Editor clips come and go on their own; Pattern Editor clips only change (they are

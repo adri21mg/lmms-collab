@@ -46,6 +46,7 @@
 #include "ProjectJournal.h"
 #include "lmms_export.h"
 
+class QProgressDialog;
 class QTcpSocket;
 class QTimer;
 
@@ -237,6 +238,8 @@ private:
 	void onReadyRead();
 	void handleMessage(const QJsonObject& message);
 	void handleJoined(const QJsonObject& message);
+	//! Loads the joined project (after its shared files are here) and goes live
+	void finishJoin(const QJsonObject& message);
 	//! Transactions are applied strictly in server order, but only while no mouse button is held: an
 	//! editor in the middle of a drag keeps pointers to the objects it edits, so they must not change
 	//! (or disappear) under it. Queued transactions are applied as soon as the gesture ends.
@@ -297,6 +300,46 @@ private:
 	//! arrives later) are tried again after the next transaction
 	void setAutomationObjects(AutomationClip* clip, const QJsonArray& objects);
 	void retryAutomationObjects();
+
+	// Shared files (milestone M6a)
+	struct SharedFile
+	{
+		QString path;  //!< inside libraryDir(); "shared:<path>" in the project
+		qint64 size = 0;
+	};
+	//! This project's shared files on this computer (<workspace>/collab/<project>/library)
+	QString libraryDir() const;
+	void setLibrary(const QJsonArray& files);
+	//! A shared file announced by the server or a collaborator; downloaded if it is not here
+	void addLibraryFile(const QString& path, const QString& hash, qint64 size, bool fromOthers);
+	//! Shared files of the project missing here
+	QStringList missingFiles() const;
+	//! Before joining a project: downloads its shared files missing here. With a GUI the user agrees first
+	//! (or does not join: a project without its sounds makes no sense) and sees the progress. Returns false if
+	//! the user does not want to join.
+	bool downloadMissing(const QStringList& missing);
+	void updateDownloadProgress();
+	//! Called when a download ended: the join waiting for it continues once all are here
+	void downloadsChanged();
+	void requestNextDownload();
+	void handleAssetMessage(const QJsonObject& message);
+	void handleBinary(const QByteArray& payload);
+	//! Files of this computer (not LMMS' own, not shared) that @p xml refers to: value as saved -> absolute path
+	static QHash<QString, QString> localFileRefs(const QString& xml);
+	//! Whether an object with this XML can be sent: files only this computer has are shared first (asking
+	//! the user); until then the object waits
+	bool readyToSend(const QString& xml);
+	//! Shares the local files waiting in m_shareQueue: known ones right away, new ones if the user agrees
+	void processShareQueue();
+	void uploadFile(const QString& absolutePath);
+	//! Makes every instrument and sample clip that uses @p absoluteLocal use the shared file instead
+	void rewriteReferences(const QString& absoluteLocal, const QString& sharedPath);
+	//! The user did not share @p absoluteLocal: what uses it is undone (new objects removed)
+	void dropReferences(const QString& absoluteLocal);
+	//! A shared file arrived: whatever uses it loads it again
+	void reloadReferences(const QString& sharedPath);
+	//! After creating a project: the song's own files that only this computer has
+	void shareProjectFiles();
 
 	// Controllers (milestone M5c)
 	static void addControllerStructure(Structure& s);
@@ -433,6 +476,25 @@ private:
 	QHash<ParamKey, QString> m_linkBaseline;     //!< last synchronized controller connection of every parameter
 	QHash<ParamKey, qint64> m_pendingLinks;      //!< our unacknowledged connection changes (ctx)
 	QHash<ParamKey, QString> m_unresolvedLinks;  //!< connections to controllers not found yet
+
+	QHash<QString, SharedFile> m_library;        //!< shared files of the project by SHA-256
+	QHash<QString, QString> m_localHashes;       //!< SHA-256 of local files already hashed (absolute path)
+	QStringList m_shareQueue;                    //!< local files to share (absolute paths)
+	QSet<QString> m_askingAbout;                 //!< local files the user is being asked about right now
+	QHash<QString, QString> m_uploads;           //!< uploads waiting for asset.stored: hash -> absolute path
+	bool m_shareScheduled = false;
+	bool m_asking = false;
+	QStringList m_downloadQueue;                 //!< hashes
+	QString m_downloading;                       //!< hash being downloaded
+	qint64 m_downloadSize = 0;
+	qint64 m_downloadReceived = 0;
+	std::unique_ptr<QFile> m_downloadFile;
+	QPointer<QProgressDialog> m_downloadProgress; //!< while joining
+	qint64 m_downloadTotal = 0;                  //!< bytes the progress dialog shows
+	qint64 m_downloadDone = 0;
+	std::optional<QJsonObject> m_pendingJoin;    //!< joined message waiting for its shared files
+	bool m_reading = false;                      //!< in onReadyRead() (dialogs process events meanwhile)
+	QSet<collab_id_t> m_forcePluginCheck;        //!< instruments whose state must be compared at the next flush
 	QSet<collab_id_t> m_editedTracks;  //!< tracks with open plugin windows at the last check
 	QSet<collab_id_t> m_externalGuiTracks; //!< edited tracks whose plugins have a window of their own
 	QElapsedTimer m_opaqueCheck;

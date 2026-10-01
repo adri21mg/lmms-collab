@@ -24,8 +24,10 @@
 
 #include "CollabServer.h"
 
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -41,6 +43,9 @@ namespace
 constexpr int SaveIntervalMs = 5000;
 const QString LiveFile = "live/project.mmp";
 const QString ManifestFile = "manifest.json";
+const QString LibraryFile = "library.json";
+const QString LibraryDir = "library";
+constexpr int MaxUploadsPerClient = 8;
 }
 
 
@@ -103,6 +108,7 @@ void CollabServer::onDisconnected(QTcpSocket* socket)
 	Project* project = it->second.project;
 	const QString clientId = it->second.clientId;
 	const bool hadPresence = !it->second.presence.isEmpty();
+	dropUploads(it->second);
 	m_clients.erase(it);
 	if (project && hadPresence)
 	{
@@ -123,7 +129,13 @@ void CollabServer::onReadyRead(QTcpSocket* socket)
 	QByteArray payload;
 	while (client.decoder.next(type, payload))
 	{
-		const auto message = type == proto::FrameType::Json ? proto::parseMessage(payload) : std::nullopt;
+		if (type == proto::FrameType::Binary)
+		{
+			handleBinary(client, payload);
+			if (m_clients.find(socket) == m_clients.end()) { return; }
+			continue;
+		}
+		const auto message = proto::parseMessage(payload);
 		if (!message)
 		{
 			qWarning("[%s] invalid frame, closing connection", qPrintable(client.clientId));
@@ -165,6 +177,8 @@ void CollabServer::handleMessage(Client& client, const QJsonObject& message)
 	else if (t == proto::msg::Open) { handleOpen(client, message); }
 	else if (t == proto::msg::Tx) { handleTx(client, message); }
 	else if (t == proto::msg::Presence) { handlePresence(client, message); }
+	else if (t == proto::msg::AssetPut) { handleAssetPut(client, message); }
+	else if (t == proto::msg::AssetGet) { handleAssetGet(client, message); }
 	else { sendError(client, "unknown message type " + t.left(32)); }
 }
 
@@ -190,7 +204,7 @@ void CollabServer::handleCreate(Client& client, const QJsonObject& message)
 	client.project = p;
 	qInfo("[%s] %s created project \"%s\" (%d pattern clips)", qPrintable(client.clientId), qPrintable(client.user),
 		qPrintable(name), p->state.clipCount());
-	send(client, {{"t", proto::msg::Joined}, {"project", name}, {"seq", p->seq}});
+	send(client, {{"t", proto::msg::Joined}, {"project", name}, {"seq", p->seq}, {"library", libraryList(*p)}});
 	sendPresenceOfOthers(client);
 }
 
@@ -205,7 +219,7 @@ void CollabServer::handleOpen(Client& client, const QJsonObject& message)
 	qInfo("[%s] %s opened project \"%s\" at seq %lld", qPrintable(client.clientId), qPrintable(client.user),
 		qPrintable(name), p->seq);
 	send(client, {{"t", proto::msg::Joined}, {"project", name}, {"seq", p->seq},
-		{"mmp", QString::fromUtf8(p->state.toMmp())}});
+		{"mmp", QString::fromUtf8(p->state.toMmp())}, {"library", libraryList(*p)}});
 	sendPresenceOfOthers(client);
 }
 
@@ -266,7 +280,17 @@ void CollabServer::handleTx(Client& client, const QJsonObject& message)
 	int rejected = 0;
 	for (const QJsonValue& op : message.value("ops").toArray())
 	{
-		if (op.isObject() && p->state.apply(op.toObject())) { accepted.append(op); }
+		bool ok = false;
+		if (op.toObject().value("op").toString() == proto::op::LibraryAdd)
+		{
+			// Announces a file this server stored (asset.stored): it must be there, under that path
+			const QJsonObject o = op.toObject();
+			const auto asset = p->library.constFind(o.value("hash").toString());
+			ok = asset != p->library.cend() && asset->path == o.value("path").toString()
+				&& asset->size == o.value("size").toInteger();
+		}
+		else { ok = op.isObject() && p->state.apply(op.toObject()); }
+		if (ok) { accepted.append(op); }
 		else { ++rejected; }
 	}
 	if (!accepted.isEmpty())
@@ -282,6 +306,132 @@ void CollabServer::handleTx(Client& client, const QJsonObject& message)
 	// Everyone gets the transaction, including the sender (acknowledgement of its ctx)
 	broadcast(p, {{"t", proto::msg::Tx}, {"seq", p->seq}, {"clientId", client.clientId},
 		{"ctx", message.value("ctx")}, {"ops", accepted}});
+}
+
+
+QJsonArray CollabServer::libraryList(const Project& project)
+{
+	QJsonArray list;
+	for (auto it = project.library.cbegin(); it != project.library.cend(); ++it)
+	{
+		list.append(QJsonObject{{"path", it->path}, {"hash", it.key()}, {"size", it->size}});
+	}
+	return list;
+}
+
+
+bool CollabServer::saveLibrary(const Project& project)
+{
+	QSaveFile file{projectDir(project.name) + "/" + LibraryFile};
+	return file.open(QIODevice::WriteOnly)
+		&& file.write(QJsonDocument{QJsonObject{{"files", libraryList(project)}}}.toJson()) >= 0 && file.commit();
+}
+
+
+void CollabServer::handleAssetPut(Client& client, const QJsonObject& message)
+{
+	Project* p = client.project;
+	const QString hash = message.value("hash").toString();
+	const qint64 size = message.value("size").toInteger();
+	const QString name = proto::sanitizeAssetName(message.value("name").toString());
+	auto fail = [&](const QString& text) {
+		qWarning("[%s] upload refused: %s", qPrintable(client.clientId), qPrintable(text));
+		send(client, {{"t", proto::msg::AssetError}, {"hash", hash.left(64)}, {"message", text}});
+	};
+	if (!p) { return fail("no project open"); }
+	if (!proto::isValidHash(hash)) { return fail("invalid hash"); }
+	if (size <= 0 || size > proto::MaxAssetSize) { return fail("file too large"); }
+	if (name.isEmpty()) { return fail("this kind of file cannot be shared"); }
+
+	// The same content is stored once
+	if (const auto known = p->library.constFind(hash); known != p->library.cend())
+	{
+		return send(client, {{"t", proto::msg::AssetStored}, {"hash", hash}, {"path", known->path}});
+	}
+	if (client.uploads.count(hash)) { return; }
+	if (static_cast<int>(client.uploads.size()) >= MaxUploadsPerClient) { return fail("too many uploads at once"); }
+
+	const QString dir = projectDir(p->name) + "/" + LibraryDir;
+	QDir{}.mkpath(dir);
+	auto file = std::make_unique<QFile>(dir + "/.part-" + client.clientId + "-" + hash);
+	if (!file->open(QIODevice::WriteOnly | QIODevice::Truncate)) { return fail("cannot store the file"); }
+	client.uploads[hash] = Upload{name, size, 0, std::move(file)};
+	qInfo("[%s] uploading %s (%lld bytes)", qPrintable(client.clientId), qPrintable(name), static_cast<long long>(size));
+}
+
+
+void CollabServer::handleBinary(Client& client, const QByteArray& payload)
+{
+	if (payload.size() < proto::AssetHashSize)
+	{
+		qWarning("[%s] invalid binary frame, closing connection", qPrintable(client.clientId));
+		client.socket->abort();
+		return;
+	}
+	const QString hash = QString::fromLatin1(payload.left(proto::AssetHashSize).toHex());
+	const auto it = client.uploads.find(hash);
+	if (it == client.uploads.end() || !client.project) { return; } // e.g. an upload refused earlier
+	Upload& upload = it->second;
+	const QByteArray data = payload.mid(proto::AssetHashSize);
+	auto fail = [&](const QString& text) {
+		qWarning("[%s] upload of %s failed: %s", qPrintable(client.clientId), qPrintable(upload.name), qPrintable(text));
+		upload.file->remove();
+		send(client, {{"t", proto::msg::AssetError}, {"hash", hash}, {"message", text}});
+		client.uploads.erase(it);
+	};
+	if (upload.received + data.size() > upload.size) { return fail("more data than announced"); }
+	if (upload.file->write(data) != data.size()) { return fail("cannot store the file"); }
+	upload.received += data.size();
+	if (upload.received < upload.size) { return; }
+
+	// Complete: the content must be what was announced
+	upload.file->close();
+	QCryptographicHash sha{QCryptographicHash::Sha256};
+	if (!upload.file->open(QIODevice::ReadOnly) || !sha.addData(upload.file.get()))
+	{
+		return fail("cannot read the stored file");
+	}
+	upload.file->close();
+	if (QString::fromLatin1(sha.result().toHex()) != hash) { return fail("the file arrived damaged"); }
+
+	// A free name in the library: "name.wav", "name (2).wav", ...
+	Project* p = client.project;
+	const QString dir = projectDir(p->name) + "/" + LibraryDir;
+	const QString base = upload.name.section('.', 0, -2);
+	const QString suffix = upload.name.section('.', -1);
+	QString path = upload.name;
+	for (int n = 2; QFileInfo::exists(dir + "/" + path); ++n) { path = QString{"%1 (%2).%3"}.arg(base).arg(n).arg(suffix); }
+	if (!upload.file->rename(dir + "/" + path)) { return fail("cannot store the file"); }
+
+	p->library.insert(hash, Project::Asset{path, upload.size});
+	saveLibrary(*p);
+	qInfo("[%s] stored shared file %s (%lld bytes)", qPrintable(client.clientId), qPrintable(path),
+		static_cast<long long>(upload.size));
+	send(client, {{"t", proto::msg::AssetStored}, {"hash", hash}, {"path", path}});
+	client.uploads.erase(it);
+}
+
+
+void CollabServer::handleAssetGet(Client& client, const QJsonObject& message)
+{
+	Project* p = client.project;
+	const QString hash = message.value("hash").toString();
+	const auto asset = p ? p->library.constFind(hash) : QHash<QString, Project::Asset>::const_iterator{};
+	QFile file{p ? projectDir(p->name) + "/" + LibraryDir + "/" + (asset != p->library.cend() ? asset->path : QString{}) : QString{}};
+	if (!p || asset == p->library.cend() || !file.open(QIODevice::ReadOnly))
+	{
+		return send(client, {{"t", proto::msg::AssetError}, {"hash", hash.left(64)}, {"message", "no such file"}});
+	}
+	send(client, {{"t", proto::msg::AssetData}, {"hash", hash}, {"size", asset->size}});
+	const QByteArray rawHash = QByteArray::fromHex(hash.toLatin1());
+	while (!file.atEnd()) { client.socket->write(proto::encodeBinaryFrame(rawHash, file.read(proto::AssetChunkSize))); }
+}
+
+
+void CollabServer::dropUploads(Client& client)
+{
+	for (auto& [hash, upload] : client.uploads) { upload.file->remove(); }
+	client.uploads.clear();
 }
 
 
@@ -333,6 +483,21 @@ CollabServer::Project* CollabServer::findOrLoadProject(const QString& name)
 	if (manifest.open(QIODevice::ReadOnly))
 	{
 		project->seq = QJsonDocument::fromJson(manifest.readAll()).object().value("seq").toInteger();
+	}
+	QFile library{projectDir(name) + "/" + LibraryFile};
+	if (library.open(QIODevice::ReadOnly))
+	{
+		for (const QJsonValue& v : QJsonDocument::fromJson(library.readAll()).object().value("files").toArray())
+		{
+			const QJsonObject f = v.toObject();
+			const QString hash = f.value("hash").toString();
+			const QString path = proto::sanitizeAssetName(f.value("path").toString());
+			// Only files that are really there
+			if (proto::isValidHash(hash) && !path.isEmpty() && QFileInfo::exists(projectDir(name) + "/" + LibraryDir + "/" + path))
+			{
+				project->library.insert(hash, Project::Asset{path, f.value("size").toInteger()});
+			}
+		}
 	}
 	qInfo("Loaded project \"%s\" from disk (seq %lld)", qPrintable(name), project->seq);
 	Project* p = project.get();

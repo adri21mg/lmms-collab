@@ -31,6 +31,7 @@
 #include <QJsonArray>
 
 #include <QJsonDocument>
+#include <QStringList>
 #include <QRegularExpression>
 #include <QtEndian>
 
@@ -51,6 +52,38 @@ QByteArray encodeJsonFrame(const QJsonObject& message)
 	frame[4] = static_cast<char>(FrameType::Json);
 	frame.append(payload);
 	return frame;
+}
+
+
+QByteArray encodeBinaryFrame(const QByteArray& hash, const QByteArray& data)
+{
+	QByteArray frame(HeaderSize, Qt::Uninitialized);
+	qToBigEndian<quint32>(static_cast<quint32>(hash.size() + data.size()), frame.data());
+	frame[4] = static_cast<char>(FrameType::Binary);
+	frame.append(hash);
+	frame.append(data);
+	return frame;
+}
+
+
+bool isValidHash(const QString& hash)
+{
+	static const QRegularExpression re{"^[0-9a-f]{64}$"};
+	return re.match(hash).hasMatch();
+}
+
+
+QString sanitizeAssetName(const QString& name)
+{
+	static const QStringList types{"wav", "ogg", "flac", "mp3", "aif", "aiff", "au", "voc", "w64", "raw", "sf2", "sf3",
+		"gig", "pat", "ds", "xiz", "xpf", "mid", "midi"};
+	QString base = name.section('/', -1).section('\\', -1).trimmed();
+	static const QRegularExpression unsafe{"[^A-Za-z0-9 _.()\\-]"};
+	base.replace(unsafe, "_");
+	while (base.startsWith('.')) { base.remove(0, 1); }
+	const QString suffix = base.section('.', -1).toLower();
+	if (base.isEmpty() || !base.contains('.') || !types.contains(suffix) || base.size() > 120) { return {}; }
+	return base;
 }
 
 
@@ -180,7 +213,7 @@ const std::vector<FieldSpec>& clipFields()
 	static const std::vector<FieldSpec> fields = {
 		{"pos", K::Int, 0, MaxTicks}, {"len", K::Int, 0, MaxTicks}, {"off", K::Int, -MaxTicks, MaxTicks},
 		{"name", K::String}, {"color", K::Color}, {"muted", K::Bool}, {"autoresize", K::Bool},
-		{"steps", K::Int, 1, 4096}};
+		{"steps", K::Int, 1, 4096}, {"src", K::String}};
 	return fields;
 }
 

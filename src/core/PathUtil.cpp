@@ -37,7 +37,22 @@ namespace lmms::PathUtil
 {
 	auto relativeBases = std::array{ Base::ProjectDir, Base::FactoryProjects, Base::FactorySample, Base::UserSample, Base::UserVST, Base::Preset,
 		Base::FactoryPresets, Base::UserLADSPA, Base::DefaultLADSPA, Base::UserSoundfont, Base::DefaultSoundfont, Base::UserGIG, Base::DefaultGIG,
-		Base::LocalDir };
+		Base::LocalDir, Base::Shared };
+
+	namespace
+	{
+		QString s_sharedLocation;
+	}
+
+	void setSharedLocation(const QString& dir)
+	{
+		s_sharedLocation = dir.isEmpty() ? QString{} : QDir::cleanPath(QDir{dir}.absolutePath()) + "/";
+	}
+
+	QString sharedLocation()
+	{
+		return s_sharedLocation;
+	}
 
 	QString baseLocation(const Base base, bool* error /* = nullptr*/)
 	{
@@ -72,6 +87,10 @@ namespace lmms::PathUtil
 			case Base::DefaultSoundfont : loc = ConfigManager::inst()->userSf2Dir(); break;
 			case Base::UserGIG          : loc = ConfigManager::inst()->gigDir(); break;
 			case Base::DefaultGIG       : loc = ConfigManager::inst()->userGigDir(); break;
+			case Base::Shared:
+				// The collaboration project's shared files: the same "shared:" path on every client
+				if (error) { *error = s_sharedLocation.isEmpty(); }
+				return s_sharedLocation;
 			case Base::LocalDir:
 			{
 				const Song* s = Engine::getSong();
@@ -119,6 +138,7 @@ namespace lmms::PathUtil
 			case Base::UserGIG          : return QStringLiteral("usergig:");
 			case Base::DefaultGIG       : return QStringLiteral("defaultgig:");
 			case Base::LocalDir         : return QStringLiteral("local:");
+			case Base::Shared           : return QStringLiteral("shared:");
 			default                     : return QStringLiteral("");
 		}
 	}
@@ -233,6 +253,12 @@ namespace lmms::PathUtil
 		QString path = serializePath(input);
 		QFileInfo inputFileInfo = QFileInfo(path);
 		QString absolutePath = inputFileInfo.isAbsolute() ? path : toAbsolute(path);
+
+		// A shared file of the collaboration project is always named that way, so every client finds it
+		if (!s_sharedLocation.isEmpty() && absolutePath.startsWith(s_sharedLocation, Qt::CaseInsensitive))
+		{
+			return basePrefix(Base::Shared) + absolutePath.mid(s_sharedLocation.length());
+		}
 
 		Base shortestBase = Base::Absolute;
 		QString shortestPath = relativeOrAbsolute(absolutePath, shortestBase);
