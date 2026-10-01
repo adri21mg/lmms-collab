@@ -5716,6 +5716,9 @@ void PianoRollWindow::showEvent(QShowEvent*)
 
 	// Has a clip already, do nothing
 	if (m_editor->hasValidMidiClip()) { return; }
+	// While a project loads, the song is incomplete: an instrument track may seem to have no clips
+	// (in a collaboration session such a clip would also exist on this computer only)
+	if (Engine::getSong()->isLoadingProject()) { return; }
 
 	InstrumentTrack* firstTrack = nullptr;
 	MidiClip* firstEmptyClip = nullptr;

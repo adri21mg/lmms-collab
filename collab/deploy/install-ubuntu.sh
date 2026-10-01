@@ -2,21 +2,38 @@
 # Installs the LMMS collaboration server on Ubuntu (24.04 or newer) / Debian (12 or newer) as a service that starts with
 # the computer. Run it from the LMMS source folder:
 #
-#   sudo bash collab/deploy/install-ubuntu.sh                 # listens on every address
+#   sudo bash collab/deploy/install-ubuntu.sh                      # listens on every address
 #   sudo bash collab/deploy/install-ubuntu.sh --listen 100.x.y.z   # only on one address (e.g. your Tailscale IP)
 #
-# Running it again updates the server (projects are kept in /var/lib/lmms-collab).
+# Versions are always kept by the server. To also submit them to a Perforce (Helix Core) server, add:
+#   --p4port 127.0.0.1:1666 --p4user lmms-collab --p4depot //depot/music
+# (that user logs in once on this computer, see collab/deploy/README.md)
+#
+# Running it again updates the server; the settings of the last install are kept unless given again,
+# and projects are kept in /var/lib/lmms-collab.
 set -euo pipefail
 
+SETTINGS=/etc/default/lmms-collab-server
 LISTEN=0.0.0.0
 PORT=42871
+P4ARGS=""
+if [[ -f $SETTINGS ]]; then source "$SETTINGS"; fi
+P4PORT_ARG="" P4USER_ARG="" P4DEPOT_ARG=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--listen) LISTEN="$2"; shift 2 ;;
 		--port) PORT="$2"; shift 2 ;;
+		--p4port) P4PORT_ARG="$2"; shift 2 ;;
+		--p4user) P4USER_ARG="$2"; shift 2 ;;
+		--p4depot) P4DEPOT_ARG="$2"; shift 2 ;;
+		--no-p4) P4ARGS=""; shift ;;
 		*) echo "Unknown option $1"; exit 1 ;;
 	esac
 done
+if [[ -n $P4PORT_ARG ]]; then
+	if [[ -z $P4USER_ARG || -z $P4DEPOT_ARG ]]; then echo "--p4port needs --p4user and --p4depot"; exit 1; fi
+	P4ARGS="--p4port $P4PORT_ARG --p4user $P4USER_ARG --p4depot $P4DEPOT_ARG"
+fi
 
 if [[ $EUID -ne 0 ]]; then echo "Run it with sudo."; exit 1; fi
 SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # the collab folder
@@ -35,7 +52,7 @@ rm -rf "$BUILD"
 echo "== Service"
 id lmms-collab >/dev/null 2>&1 || useradd --system --home-dir /var/lib/lmms-collab --shell /usr/sbin/nologin lmms-collab
 install -d -o lmms-collab -g lmms-collab -m 750 /var/lib/lmms-collab
-printf 'LISTEN=%s\nPORT=%s\n' "$LISTEN" "$PORT" > /etc/default/lmms-collab-server
+printf 'LISTEN=%s\nPORT=%s\nP4ARGS="%s"\n' "$LISTEN" "$PORT" "$P4ARGS" > "$SETTINGS"
 install -m 644 "$SOURCE/deploy/lmms-collab-server.service" /etc/systemd/system/lmms-collab-server.service
 systemctl daemon-reload
 systemctl enable lmms-collab-server
@@ -45,6 +62,7 @@ systemctl --no-pager --lines=5 status lmms-collab-server || true
 
 echo
 echo "Done: listening on $LISTEN:$PORT."
+if [[ -n $P4ARGS ]]; then echo "  Versions also go to Perforce: $P4ARGS"; fi
 echo "  Logs:    journalctl -u lmms-collab-server -f"
 echo "  Stop:    sudo systemctl stop lmms-collab-server"
 echo "  Projects (back them up!): /var/lib/lmms-collab"

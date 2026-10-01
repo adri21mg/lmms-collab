@@ -29,6 +29,8 @@ add_executable(lmms-collab-server
 	server/CollabServer.h
 	server/ProjectState.cpp
 	server/ProjectState.h
+	server/P4Exporter.cpp
+	server/P4Exporter.h
 )
 set_target_properties(lmms-collab-server PROPERTIES AUTOMOC ON)
 target_link_libraries(lmms-collab-server PRIVATE

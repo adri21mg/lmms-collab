@@ -27,6 +27,8 @@
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QDir>
+#include <QSysInfo>
 #include <QTimer>
 
 #include "CollabProtocol.h"
@@ -80,9 +82,18 @@ int main(int argc, char* argv[])
 		"127.0.0.1"};
 	const QCommandLineOption dataOption{"data", "Directory where shared projects are stored.", "dir",
 		"collab-data"};
+	// Versions are always kept by the server; with Perforce they are also submitted there
+	const QCommandLineOption p4PortOption{"p4port", "Also submit versions to this Perforce server (e.g. 127.0.0.1:1666).",
+		"address"};
+	const QCommandLineOption p4UserOption{"p4user", "Perforce user of the server (logged in once, with a ticket that "
+		"does not expire).", "user"};
+	const QCommandLineOption p4DepotOption{"p4depot", "Depot folder for the projects (e.g. //depot/music).", "path"};
+	const QCommandLineOption p4ClientOption{"p4client", "Perforce workspace of the server (created when missing; "
+		"default lmms-collab_<computer name>).", "name"};
 	parser.addOption(portOption);
 	parser.addOption(listenOption);
 	parser.addOption(dataOption);
+	for (const auto& option : {p4PortOption, p4UserOption, p4DepotOption, p4ClientOption}) { parser.addOption(option); }
 	parser.process(app);
 
 	bool portOk = false;
@@ -93,7 +104,27 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
-	lmms::collab::CollabServer server{QDir{parser.value(dataOption)}};
+	const QDir dataDir{parser.value(dataOption)};
+	lmms::collab::CollabServer server{dataDir};
+	if (parser.isSet(p4PortOption))
+	{
+		lmms::collab::P4Exporter::Config p4;
+		p4.port = parser.value(p4PortOption);
+		p4.user = parser.value(p4UserOption);
+		p4.depot = parser.value(p4DepotOption);
+		while (p4.depot.endsWith('/')) { p4.depot.chop(1); }
+		p4.client = parser.isSet(p4ClientOption) ? parser.value(p4ClientOption)
+			: "lmms-collab_" + QSysInfo::machineHostName().section('.', 0, 0);
+		p4.root = QDir{dataDir.absoluteFilePath("p4")}.absolutePath();
+		if (p4.user.isEmpty() || !lmms::collab::P4Exporter::isValidDepotPath(p4.depot) || p4.client.isEmpty())
+		{
+			qCritical("--p4port needs --p4user and --p4depot (like //depot/music)");
+			return 1;
+		}
+		server.setPerforce(p4);
+		qInfo("Versions are also submitted to Perforce %s as %s into %s (workspace %s)", qPrintable(p4.port),
+			qPrintable(p4.user), qPrintable(p4.depot), qPrintable(p4.client));
+	}
 	if (!server.listen(parser.value(listenOption), static_cast<quint16>(port))) { return 1; }
 
 	// Graceful shutdown on Ctrl+C / SIGTERM: leave the event loop, then the server saves every project

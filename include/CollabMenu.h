@@ -26,8 +26,12 @@
 #define LMMS_GUI_COLLAB_MENU_H
 
 #include <QMenu>
+#include <QPointer>
+#include <QSet>
 
 class QProcess;
+class QDialog;
+class QTreeWidget;
 
 namespace lmms::gui
 {
@@ -46,6 +50,11 @@ private:
 	//! "Host a session": the collaboration server, run by this LMMS for as long as it is open; error text or ""
 	QString startHosting();
 	void stopHosting();
+	//! "Create version...": asks for a description, the server keeps the project as it is now
+	void createVersion();
+	//! "Versions...": the project's versions (kept open and updated while someone creates one)
+	void showVersions();
+	void fillVersions(const QJsonArray& versions);
 	bool isHosting() const;
 	//! Addresses of this computer others can connect to (Tailscale first)
 	static QString hostAddresses();
@@ -55,6 +64,11 @@ private:
 	QAction* m_disconnectAction;
 	QAction* m_saveAction;
 	QAction* m_stopHostingAction;
+	QAction* m_createVersionAction;
+	QAction* m_versionsAction;
+	QPointer<QDialog> m_versionsDialog;
+	QTreeWidget* m_versionsList = nullptr;
+	QSet<int> m_myVersions; //!< versions this user created in this session (their Perforce errors are shown)
 	QProcess* m_hostServer = nullptr;
 	QAction* m_statusAction;
 };

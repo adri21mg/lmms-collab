@@ -47,6 +47,8 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QHeaderView>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include "CollabPresence.h"
@@ -55,6 +57,8 @@
 #include "ConfigManager.h"
 #include "lmmsconfig.h"
 #include "MainWindow.h"
+#include "TextFloat.h"
+#include "embed.h"
 
 namespace lmms::gui
 {
@@ -76,6 +80,10 @@ CollabMenu::CollabMenu(MainWindow* mainWindow) :
 	m_saveAction = addAction(tr("Save on server now"), this, [] { CollabSession::instance()->saveNow(); });
 	m_stopHostingAction = addAction(tr("Stop hosting the session"), this, &CollabMenu::stopHosting);
 	addSeparator();
+	m_createVersionAction = addAction(embed::getIconPixmap("project_save"), tr("Create version..."), this,
+		&CollabMenu::createVersion);
+	m_versionsAction = addAction(tr("Versions..."), this, &CollabMenu::showVersions);
+	addSeparator();
 
 	// Collaborators' cursors and where they are (shown at the right of the menu bar)
 	auto presence = new CollabPresence(mainWindow);
@@ -93,6 +101,46 @@ CollabMenu::CollabMenu(MainWindow* mainWindow) :
 	connect(session, &CollabSession::stateChanged, this, &CollabMenu::updateState);
 	connect(session, &CollabSession::errorOccurred, this, [this](const QString& message) {
 		QMessageBox::warning(m_mainWindow, tr("Collaboration"), message);
+	});
+
+	// Versions: everybody in the project hears about them
+	connect(session, &CollabSession::versionCreated, this, [this](const QJsonObject& version) {
+		const int id = version.value("id").toInt();
+		const QString by = version.value("by").toString();
+		const bool mine = by == CollabSession::instance()->userName();
+		if (mine) { m_myVersions.insert(id); }
+		const QString description = version.value("description").toString().section('\n', 0, 0);
+		TextFloat::displayMessage(tr("Version %1").arg(id),
+			(mine ? tr("You created version %1: \"%2\"").arg(id).arg(description)
+				: tr("%1 created version %2: \"%3\"").arg(by).arg(id).arg(description))
+				+ (version.value("p4").toObject().value("state") == "pending" ? "\n" + tr("Sending it to Perforce...") : QString{}),
+			embed::getIconPixmap("project_save"), 6000);
+		if (m_versionsDialog) { CollabSession::instance()->requestVersions(); }
+	});
+	connect(session, &CollabSession::versionPerforce, this, [this](int id, const QJsonObject& p4) {
+		const QString state = p4.value("state").toString();
+		if (state == "submitted")
+		{
+			TextFloat::displayMessage(tr("Version %1").arg(id),
+				tr("Version %1 is in Perforce (change %2)").arg(id).arg(p4.value("change").toInt()),
+				embed::getIconPixmap("project_save"), 5000);
+		}
+		else if (state == "unchanged")
+		{
+			TextFloat::displayMessage(tr("Version %1").arg(id),
+				tr("Nothing changed since the last version in Perforce"), embed::getIconPixmap("project_save"), 5000);
+		}
+		else if (state == "failed" && m_myVersions.contains(id))
+		{
+			QMessageBox::warning(m_mainWindow, tr("Version %1").arg(id),
+				tr("Version %1 is kept on the server, but it could not be sent to Perforce:\n\n%2")
+					.arg(id).arg(p4.value("error").toString()));
+		}
+		if (m_versionsDialog) { CollabSession::instance()->requestVersions(); }
+	});
+	connect(session, &CollabSession::versionsReceived, this, &CollabMenu::fillVersions);
+	connect(session, &CollabSession::versionError, this, [this](const QString& message) {
+		QMessageBox::warning(m_mainWindow, tr("Versions"), message);
 	});
 	updateState();
 }
@@ -123,6 +171,9 @@ void CollabMenu::updateState()
 	m_connectAction->setEnabled(idle);
 	m_disconnectAction->setEnabled(!idle); // also stops reconnecting
 	m_saveAction->setEnabled(session->state() == CollabSession::State::Live);
+	m_createVersionAction->setEnabled(session->state() == CollabSession::State::Live);
+	m_versionsAction->setEnabled(session->state() == CollabSession::State::Live);
+	if (m_versionsDialog && session->state() == CollabSession::State::Live) { session->requestVersions(); }
 	m_stopHostingAction->setVisible(isHosting());
 }
 
@@ -439,6 +490,83 @@ void CollabMenu::showConnectDialog()
 
 	CollabSession::instance()->connectToServer(host, port, user->text().trimmed(), chosenProject,
 		create ? CollabSession::JoinMode::Create : CollabSession::JoinMode::Open, userColor.name());
+}
+
+
+void CollabMenu::createVersion()
+{
+	auto session = CollabSession::instance();
+	if (session->state() != CollabSession::State::Live) { return; }
+	bool ok = false;
+	const QString description = QInputDialog::getMultiLineText(m_mainWindow, tr("Create version"),
+		tr("A version keeps the project \"%1\" as it is now, for everyone, so you can go back to it later.\n\n"
+			"Describe it (what changed, who did what):").arg(session->projectName()), QString{}, &ok).trimmed();
+	if (!ok) { return; }
+	if (description.isEmpty())
+	{
+		QMessageBox::information(m_mainWindow, tr("Create version"), tr("A version needs a description."));
+		return;
+	}
+	session->createVersion(description);
+}
+
+
+void CollabMenu::showVersions()
+{
+	auto session = CollabSession::instance();
+	if (m_versionsDialog)
+	{
+		m_versionsDialog->raise();
+		m_versionsDialog->activateWindow();
+		session->requestVersions();
+		return;
+	}
+	auto dialog = new QDialog{m_mainWindow};
+	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	dialog->setWindowTitle(tr("Versions of \"%1\"").arg(session->projectName()));
+	dialog->resize(760, 380);
+	auto layout = new QVBoxLayout{dialog};
+	m_versionsList = new QTreeWidget{dialog};
+	m_versionsList->setHeaderLabels({tr("Version"), tr("Date"), tr("By"), tr("Description"), tr("Perforce")});
+	m_versionsList->setRootIsDecorated(false);
+	m_versionsList->setAlternatingRowColors(true);
+	m_versionsList->header()->setStretchLastSection(false);
+	m_versionsList->header()->setSectionResizeMode(3, QHeaderView::Stretch);
+	layout->addWidget(m_versionsList);
+	auto buttons = new QDialogButtonBox{QDialogButtonBox::Close, dialog};
+	auto create = buttons->addButton(tr("Create version..."), QDialogButtonBox::ActionRole);
+	connect(create, &QPushButton::clicked, this, &CollabMenu::createVersion);
+	connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+	layout->addWidget(buttons);
+	m_versionsDialog = dialog;
+	dialog->show();
+	session->requestVersions();
+}
+
+
+void CollabMenu::fillVersions(const QJsonArray& versions)
+{
+	if (!m_versionsDialog || !m_versionsList) { return; }
+	m_versionsList->clear();
+	// Newest first
+	for (qsizetype i = versions.size() - 1; i >= 0; --i)
+	{
+		const QJsonObject version = versions.at(i).toObject();
+		const QJsonObject p4 = version.value("p4").toObject();
+		const QString state = p4.value("state").toString();
+		QString perforce;
+		if (state == "submitted") { perforce = tr("change %1").arg(p4.value("change").toInt()); }
+		else if (state == "pending") { perforce = tr("sending..."); }
+		else if (state == "unchanged") { perforce = tr("no changes"); }
+		else if (state == "failed") { perforce = tr("not sent"); }
+		const QString description = version.value("description").toString();
+		const QDateTime at = QDateTime::fromString(version.value("at").toString(), Qt::ISODate).toLocalTime();
+		auto item = new QTreeWidgetItem{m_versionsList, {QString::number(version.value("id").toInt()),
+			at.toString("dd/MM/yyyy HH:mm"), version.value("by").toString(), description.section('\n', 0, 0), perforce}};
+		item->setToolTip(3, description);
+		if (state == "failed") { item->setToolTip(4, p4.value("error").toString()); }
+	}
+	for (int column : {0, 1, 2, 4}) { m_versionsList->resizeColumnToContents(column); }
 }
 
 } // namespace lmms::gui

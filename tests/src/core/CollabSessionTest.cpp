@@ -30,6 +30,7 @@
 #include <QRandomGenerator>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QtTest>
 
 #include "AutomationClip.h"
@@ -1322,6 +1323,67 @@ private slots:
 	}
 
 	// ---- M7b: reconnecting ----
+
+	void testVersions()
+	{
+		auto session = CollabSession::instance();
+		QJsonObject created;
+		QJsonArray listed;
+		QString error;
+		auto c1 = connect(session, &CollabSession::versionCreated, [&](const QJsonObject& v) { created = v; });
+		auto c2 = connect(session, &CollabSession::versionsReceived, [&](const QJsonArray& v) { listed = v; });
+		auto c3 = connect(session, &CollabSession::versionError, [&](const QString& m) { error = m; });
+		// A version is the project as it is now: a change made just before is in it
+		auto track = dynamic_cast<InstrumentTrack*>(Track::create(Track::Type::Instrument, Engine::getSong()));
+		QVERIFY(track);
+		track->setName("Version marker");
+		session->createVersion("Before the chorus\nAdri's bass");
+		QTRY_VERIFY_WITH_TIMEOUT(!created.isEmpty(), 5000);
+		QCOMPARE(created.value("by").toString(), session->userName());
+		QCOMPARE(created.value("description").toString(), QString{"Before the chorus\nAdri's bass"});
+		QCOMPARE(created.value("p4").toObject().value("state").toString(), QString{"off"}); // no Perforce here
+		const QString file = m_dataDir.filePath(QString{"projects/session-test/versions/%1/project.mmp"}
+			.arg(created.value("id").toInt()));
+		QFile mmp{file};
+		QVERIFY(mmp.open(QIODevice::ReadOnly));
+		QVERIFY(mmp.readAll().contains("Version marker"));
+		session->createVersion("   ");
+		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+		QCOMPARE(session->state(), CollabSession::State::Live); // a refused version does not end the session
+		session->requestVersions();
+		QTRY_VERIFY_WITH_TIMEOUT(!listed.isEmpty(), 5000);
+		QCOMPARE(listed.last().toObject().value("id").toInt(), created.value("id").toInt());
+		disconnect(c1);
+		disconnect(c2);
+		disconnect(c3);
+	}
+
+	void testRejectedChanges()
+	{
+		auto session = CollabSession::instance();
+		// A clip of our own, known to the server
+		auto track = dynamic_cast<InstrumentTrack*>(Track::create(Track::Type::Instrument, Engine::getSong()));
+		QVERIFY(track);
+		auto clip = new MidiClip(track);
+		session->flushAll();
+		QVERIFY(session->waitUntilSaved(3000));
+		const collab_id_t clipId = clip->collabId();
+		// Someone removes it while we add a note to it: the server cannot take our note
+		m_peer.sendOps({QJsonObject{{"op", "clip.remove"}, {"id", proto::idString(clipId)}}});
+		QThread::msleep(300); // the server has it before our note (LMMS does not see it yet: no events here)
+		clip->addNote(Note{TimePos{48}, TimePos{0}, 67}, false);
+		session->flushAll();
+		// The model differs from the project now: it is loaded again from the server
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Reconnecting, 5000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 15000);
+		QVERIFY(session->hadOfflineChanges()); // the user was offered to keep that version
+		bool found = false;
+		for (Track* t : Engine::getSong()->tracks())
+		{
+			for (Clip* c : t->getClips()) { found = found || c->collabId() == clipId; }
+		}
+		QVERIFY2(!found, "the clip is gone, as on the server");
+	}
 
 	void testReconnect()
 	{

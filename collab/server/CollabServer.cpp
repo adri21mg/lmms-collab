@@ -35,6 +35,8 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 
+#include <algorithm>
+
 namespace lmms::collab
 {
 
@@ -45,6 +47,7 @@ const QString LiveFile = "live/project.mmp";
 const QString ManifestFile = "manifest.json";
 const QString LibraryFile = "library.json";
 const QString LibraryDir = "library";
+const QString VersionsDir = "versions";
 constexpr int MaxUploadsPerClient = 8;
 }
 
@@ -63,6 +66,14 @@ CollabServer::CollabServer(const QDir& dataDir, QObject* parent) :
 CollabServer::~CollabServer()
 {
 	saveAll();
+	// A Perforce submit that is running is finished (queued ones are not started)
+	if (m_p4Thread.joinable()) { m_p4Thread.join(); }
+}
+
+
+void CollabServer::setPerforce(const P4Exporter::Config& config)
+{
+	m_p4 = config;
 }
 
 
@@ -184,6 +195,8 @@ void CollabServer::handleMessage(Client& client, const QJsonObject& message)
 	else if (t == proto::msg::Presence) { handlePresence(client, message); }
 	else if (t == proto::msg::AssetPut) { handleAssetPut(client, message); }
 	else if (t == proto::msg::AssetGet) { handleAssetGet(client, message); }
+	else if (t == proto::msg::VersionCreate) { handleVersionCreate(client, message); }
+	else if (t == proto::msg::VersionsGet) { handleVersionsGet(client); }
 	else { sendError(client, "unknown message type " + t.left(32)); }
 }
 
@@ -305,7 +318,15 @@ void CollabServer::handleTx(Client& client, const QJsonObject& message)
 		}
 		else { ok = op.isObject() && p->state.apply(op.toObject()); }
 		if (ok) { accepted.append(op); }
-		else { ++rejected; }
+		else
+		{
+			++rejected;
+			// What exactly, to understand it later (without the large XML)
+			QJsonObject summary = op.toObject();
+			summary.remove("xml");
+			qInfo("[%s] rejected %s", qPrintable(client.clientId),
+				QJsonDocument{summary}.toJson(QJsonDocument::Compact).left(300).constData());
+		}
 	}
 	if (!accepted.isEmpty())
 	{
@@ -318,8 +339,11 @@ void CollabServer::handleTx(Client& client, const QJsonObject& message)
 			static_cast<long long>(accepted.size()), rejected);
 	}
 	// Everyone gets the transaction, including the sender (acknowledgement of its ctx)
-	broadcast(p, {{"t", proto::msg::Tx}, {"seq", p->seq}, {"clientId", client.clientId},
-		{"ctx", message.value("ctx")}, {"ops", accepted}});
+	// The sender learns when some of its ops were not applied: its model differs from the project then
+	QJsonObject tx{{"t", proto::msg::Tx}, {"seq", p->seq}, {"clientId", client.clientId},
+		{"ctx", message.value("ctx")}, {"ops", accepted}};
+	if (rejected > 0) { tx.insert("rejected", rejected); }
+	broadcast(p, tx);
 }
 
 
@@ -578,6 +602,147 @@ void CollabServer::handleList(Client& client)
 			{"modified", live.exists() ? live.lastModified().toUTC().toString(Qt::ISODate) : QString{}}, {"users", users}});
 	}
 	send(client, {{"t", proto::msg::Projects}, {"projects", projects}});
+}
+
+
+// ------------------------------------------------------------------------------------------------
+// Versions: <project>/versions/<id>/ {project.mmp, library.json, version.json}. Shared files are never removed
+// from the library, so a version only lists them.
+
+void CollabServer::handleVersionCreate(Client& client, const QJsonObject& message)
+{
+	auto refuse = [&](const QString& text) { send(client, {{"t", proto::msg::VersionError}, {"message", text}}); };
+	Project* p = client.project;
+	if (!p) { return refuse("not in a project"); }
+	const QString description = message.value("description").toString().trimmed();
+	if (description.isEmpty()) { return refuse("a version needs a description"); }
+	if (description.size() > proto::MaxVersionDescription) { return refuse("the description is too long"); }
+	// The version is the project as it is now: every transaction before this request is in it
+	if (p->dirty)
+	{
+		if (!saveProject(*p)) { return refuse("the project could not be saved on the server"); }
+		announceSaved(*p);
+	}
+	const QJsonArray versions = versionList(p->name);
+	const int id = versions.isEmpty() ? 1 : versions.last().toObject().value("id").toInt() + 1;
+	const QString dir = projectDir(p->name) + "/" + VersionsDir + "/" + QString::number(id);
+	const QByteArray mmp = p->state.toMmp();
+	QSaveFile project{dir + "/project.mmp"};
+	QSaveFile library{dir + "/" + LibraryFile};
+	const bool ok = QDir{}.mkpath(dir)
+		&& project.open(QIODevice::WriteOnly) && project.write(mmp) >= 0 && project.commit()
+		&& library.open(QIODevice::WriteOnly)
+		&& library.write(QJsonDocument{QJsonObject{{"files", libraryList(*p)}}}.toJson()) >= 0 && library.commit();
+	const QJsonObject version{{"id", id}, {"description", description}, {"by", client.user},
+		{"at", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}, {"seq", p->seq},
+		{"p4", QJsonObject{{"state", m_p4 ? "pending" : "off"}}}};
+	if (!ok || !writeVersion(p->name, version))
+	{
+		QDir{dir}.removeRecursively();
+		return refuse("the version could not be written on the server");
+	}
+	qInfo("[%s] %s created version %d of \"%s\": %s", qPrintable(client.clientId), qPrintable(client.user), id,
+		qPrintable(p->name), qPrintable(description.section('\n', 0, 0).left(80)));
+	broadcast(p, {{"t", proto::msg::VersionCreated}, {"version", version}});
+
+	if (!m_p4) { return; }
+	P4Job job{id, {p->name, mmp, {}, description + "\n\n(" + client.user + ", LMMS-Collab version " + QString::number(id) + ")"}};
+	for (const Project::Asset& asset : p->library)
+	{
+		job.job.files.append({asset.path, projectDir(p->name) + "/" + LibraryDir + "/" + asset.path});
+	}
+	m_p4Queue.push_back(std::move(job));
+	startP4Job();
+}
+
+
+void CollabServer::handleVersionsGet(Client& client)
+{
+	if (!client.project)
+	{
+		return send(client, {{"t", proto::msg::VersionError}, {"message", "not in a project"}});
+	}
+	send(client, {{"t", proto::msg::Versions}, {"versions", versionList(client.project->name)}});
+}
+
+
+QJsonArray CollabServer::versionList(const QString& project) const
+{
+	const QDir dir{projectDir(project) + "/" + VersionsDir};
+	std::vector<std::pair<int, QJsonObject>> versions;
+	for (const QString& entry : dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot))
+	{
+		bool number = false;
+		const int id = entry.toInt(&number);
+		QFile file{dir.filePath(entry + "/version.json")};
+		if (!number || id <= 0 || !file.open(QIODevice::ReadOnly)) { continue; }
+		const QJsonObject version = QJsonDocument::fromJson(file.readAll()).object();
+		if (version.value("id").toInt() == id) { versions.emplace_back(id, version); }
+	}
+	std::sort(versions.begin(), versions.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+	QJsonArray list;
+	for (const auto& [id, version] : versions) { list.append(version); }
+	return list;
+}
+
+
+bool CollabServer::writeVersion(const QString& project, const QJsonObject& version)
+{
+	QSaveFile file{projectDir(project) + "/" + VersionsDir + "/" + QString::number(version.value("id").toInt())
+		+ "/version.json"};
+	return file.open(QIODevice::WriteOnly) && file.write(QJsonDocument{version}.toJson()) >= 0 && file.commit();
+}
+
+
+void CollabServer::startP4Job()
+{
+	if (m_p4Busy || m_p4Queue.empty() || !m_p4) { return; }
+	if (m_p4Thread.joinable()) { m_p4Thread.join(); } // the previous one has ended
+	P4Job job = std::move(m_p4Queue.front());
+	m_p4Queue.pop_front();
+	m_p4Busy = true;
+	qInfo("Submitting version %d of \"%s\" to Perforce", job.id, qPrintable(job.job.project));
+	// Perforce may take a while (large files): the sessions go on meanwhile
+	m_p4Thread = std::thread{[this, config = *m_p4, job = std::move(job)] {
+		const P4Exporter::Result result = P4Exporter::submit(config, job.job);
+		QMetaObject::invokeMethod(this, [this, project = job.job.project, id = job.id, result] {
+			p4JobDone(project, id, result);
+		}, Qt::QueuedConnection);
+	}};
+}
+
+
+void CollabServer::p4JobDone(const QString& project, int id, const P4Exporter::Result& result)
+{
+	m_p4Busy = false;
+	QJsonObject p4;
+	switch (result.status)
+	{
+	case P4Exporter::Result::Status::Submitted:
+		p4 = {{"state", "submitted"}, {"change", result.change}};
+		qInfo("Version %d of \"%s\" submitted to Perforce as change %d", id, qPrintable(project), result.change);
+		break;
+	case P4Exporter::Result::Status::Unchanged:
+		p4 = {{"state", "unchanged"}};
+		qInfo("Version %d of \"%s\": nothing changed for Perforce", id, qPrintable(project));
+		break;
+	case P4Exporter::Result::Status::Failed:
+		p4 = {{"state", "failed"}, {"error", result.error.left(1000)}};
+		qWarning("Version %d of \"%s\" not submitted to Perforce: %s", id, qPrintable(project), qPrintable(result.error));
+		break;
+	}
+	for (const QJsonValue& v : versionList(project))
+	{
+		QJsonObject version = v.toObject();
+		if (version.value("id").toInt() != id) { continue; }
+		version.insert("p4", p4);
+		writeVersion(project, version);
+	}
+	if (const auto it = m_projects.find(project); it != m_projects.end())
+	{
+		broadcast(it->second.get(), {{"t", proto::msg::VersionP4}, {"id", id}, {"p4", p4}});
+	}
+	startP4Job();
 }
 
 

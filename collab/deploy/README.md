@@ -120,6 +120,40 @@ Some internet providers (CG-NAT) do not allow port forwarding at all: Tailscale 
 
 ---
 
+## Versions (and Perforce, optional)
+
+*Collaboration → Create version...* keeps the project as it is now, with a description, so you can go back to it
+later (*Collaboration → Versions...* lists them). Versions are made only when someone asks for one, never
+automatically. The server keeps them in the `versions` folder of each project: nothing to set up.
+
+If you use **Perforce (Helix Core)**, the server can also submit every version there, as a changelist with the
+description. Only the server talks to Perforce: collaborators need no Perforce setup at all. In the depot:
+
+```
+//depot/music/.gdignore                        (an empty file: Godot ignores the folder)
+//depot/music/<project>/<project>.mmp          (opens in LMMS directly)
+//depot/music/<project>/Project files/...      (samples and other shared files)
+```
+
+Setup, once:
+
+1. Create a Perforce user for the server (e.g. `lmms-collab`) with write access to the music folder only
+   (`write user lmms-collab * //depot/music/...` in `p4 protect`), and put it in a group with
+   `Timeout: unlimited` so its login never expires.
+2. Log it in once on the server computer, as the service user:
+   ```bash
+   sudo -u lmms-collab env HOME=/var/lib/lmms-collab p4 -p 127.0.0.1:1666 -u lmms-collab login
+   ```
+   (the `p4` command-line client must be installed; use your server's address and port)
+3. Install (or update) the server with the Perforce settings:
+   ```bash
+   sudo bash collab/deploy/install-ubuntu.sh --p4port 127.0.0.1:1666 --p4user lmms-collab --p4depot //depot/music
+   ```
+
+The server creates its own workspace (`lmms-collab_<computer name>`, mapping only the music folder). If Perforce is
+unreachable, the version is still kept on the server and whoever created it is told why it was not submitted.
+On Windows, add the same `--p4port`, `--p4user` and `--p4depot` options to `start-collab-server.bat`.
+
 ## Backups
 
 All projects and their files are in one folder: `/var/lib/lmms-collab` (Ubuntu service), `collab-server-data`

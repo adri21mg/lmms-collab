@@ -25,8 +25,11 @@
 #ifndef LMMS_COLLAB_SERVER_H
 #define LMMS_COLLAB_SERVER_H
 
+#include <deque>
 #include <map>
 #include <memory>
+#include <optional>
+#include <thread>
 
 #include <QDir>
 #include <QElapsedTimer>
@@ -37,6 +40,7 @@
 #include <QTimer>
 
 #include "CollabProtocol.h"
+#include "P4Exporter.h"
 #include "ProjectState.h"
 
 class QTcpServer;
@@ -58,6 +62,8 @@ public:
 
 	//! Project names are used as directory names, so they are restricted to a safe character set
 	static bool isValidProjectName(const QString& name);
+	//! Versions are also submitted to Perforce
+	void setPerforce(const P4Exporter::Config& config);
 
 private:
 	struct Project
@@ -107,6 +113,14 @@ private:
 	void handleTx(Client& client, const QJsonObject& message);
 	void handlePresence(Client& client, const QJsonObject& message);
 	void handleList(Client& client);
+	void handleVersionCreate(Client& client, const QJsonObject& message);
+	void handleVersionsGet(Client& client);
+	//! Versions of a project, oldest first
+	QJsonArray versionList(const QString& project) const;
+	bool writeVersion(const QString& project, const QJsonObject& version);
+	//! Starts the next Perforce submit, one at a time, on a worker thread
+	void startP4Job();
+	void p4JobDone(const QString& project, int id, const P4Exporter::Result& result);
 	void handleAssetPut(Client& client, const QJsonObject& message);
 	void handleAssetGet(Client& client, const QJsonObject& message);
 	//! A part of an uploaded file
@@ -134,6 +148,16 @@ private:
 	std::map<QTcpSocket*, Client> m_clients;
 	std::map<QString, std::unique_ptr<Project>> m_projects;
 	int m_nextClientNumber = 1;
+
+	struct P4Job
+	{
+		int id = 0;
+		P4Exporter::Job job;
+	};
+	std::optional<P4Exporter::Config> m_p4;
+	std::deque<P4Job> m_p4Queue;
+	std::thread m_p4Thread;
+	bool m_p4Busy = false;
 };
 
 } // namespace lmms::collab

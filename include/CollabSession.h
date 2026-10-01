@@ -31,6 +31,7 @@
 #include <optional>
 
 #include <QHash>
+#include <QMap>
 #include <QDateTime>
 #include <QDomElement>
 #include <QJsonArray>
@@ -153,6 +154,10 @@ public:
 	QDateTime lastSaved() const { return m_savedAt; }
 	//! Asks the server to write the project to disk now
 	void saveNow();
+	//! Asks the server for a version of the project as it is now (everything sent before is in it)
+	void createVersion(const QString& description);
+	//! Asks the server for the project's versions (answered by versionsReceived)
+	void requestVersions();
 
 	//! Sends local changes right away instead of at the next throttle tick (used by tests)
 	void flushAll();
@@ -170,6 +175,13 @@ signals:
 	void presenceReceived(const QJsonObject& presence);
 	//! The session ended: forget everybody's presence
 	void presenceCleared();
+	//! Someone (maybe this user) created a version: {id, description, by, at, seq, p4}
+	void versionCreated(const QJsonObject& version);
+	//! The server's Perforce submit of a version ended: p4 = {state, change?, error?}
+	void versionPerforce(int id, const QJsonObject& p4);
+	void versionsReceived(const QJsonArray& versions);
+	//! A version request could not be done (the session goes on)
+	void versionError(const QString& message);
 
 public:
 	// JournalHook
@@ -259,6 +271,12 @@ private:
 	void fail(const QString& message);
 	void send(const QJsonObject& message);
 	void sendOps(const QJsonArray& ops);
+	//! Joining: removes clips the shared project @p mmp does not have (made by LMMS while it was loading)
+	void removeClipsNotIn(const QString& mmp);
+	//! Ops as one log line (without their XML, with the id of what it holds)
+	static QString opsSummary(const QJsonArray& ops);
+	//! The server did not take some of our changes: load the project again from it (offering this version as a file)
+	void resyncAfterRejection();
 	void onReadyRead();
 	void handleMessage(const QJsonObject& message);
 	void handleJoined(const QJsonObject& message);
@@ -535,7 +553,9 @@ private:
 	int m_reconnectAttempts = 0;
 	QString m_offlineSnapshot;                   //!< the project when the connection was lost (to see what changed)
 	bool m_unsentAtLoss = false;
-	bool m_hadOfflineChanges = false;                 //!< own changes had not reached the server when it was lost
+	bool m_hadOfflineChanges = false;
+	bool m_rejectedChanges = false;              //!< reloading because the server did not take some of our changes
+	QMap<qint64, QJsonArray> m_unacknowledgedOps; //!< by ctx, until the server acknowledged them                 //!< own changes had not reached the server when it was lost
 	bool m_sharedFilesRefresh = false;           //!< a refresh of the "Shared project" tab is scheduled
 	QSet<collab_id_t> m_forcePluginCheck;        //!< instruments whose state must be compared at the next flush
 	QSet<collab_id_t> m_editedTracks;  //!< tracks with open plugin windows at the last check

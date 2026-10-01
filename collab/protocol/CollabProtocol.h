@@ -159,7 +159,25 @@ inline constexpr auto AssetGet = "asset.get";
 inline constexpr auto AssetStored = "asset.stored";
 inline constexpr auto AssetData = "asset.data";
 inline constexpr auto AssetError = "asset.error";
+/**
+ * Versions (M8): intentional checkpoints of a project, never created automatically.
+ *   version.create {description}           -> everyone in the project: version.created {version}
+ *   the server's Perforce submit ends later -> everyone: version.p4 {id, p4}
+ *   versions.get                           -> versions {versions: [version, ...]} (oldest first)
+ *   a request that cannot be done          -> version.error {message} (the session goes on)
+ * version: {id, description, by, at (ISO date, UTC), seq, p4}
+ * p4: {state: "off" | "pending" | "submitted" | "unchanged" | "failed", change?, error?}
+ */
+inline constexpr auto VersionCreate = "version.create";
+inline constexpr auto VersionCreated = "version.created";
+inline constexpr auto VersionP4 = "version.p4";
+inline constexpr auto VersionsGet = "versions.get";
+inline constexpr auto Versions = "versions";
+inline constexpr auto VersionError = "version.error";
 } // namespace msg
+
+//! Longest version description
+inline constexpr int MaxVersionDescription = 2000;
 
 //! Largest shared file accepted
 inline constexpr qint64 MaxAssetSize = 200ll * 1024 * 1024;

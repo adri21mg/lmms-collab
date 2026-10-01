@@ -23,12 +23,15 @@
  */
 
 #include "CollabSession.h"
+#include "CollabLocalGesture.h"
 #include "CollabSessionUtil.h"
 
 #include <algorithm>
 
 #include <QCoreApplication>
+#include <utility>
 #include <QDir>
+#include <QRegularExpression>
 #include <QElapsedTimer>
 #include <QPushButton>
 #include <QMessageBox>
@@ -216,6 +219,7 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 	m_seq = 0;
 	m_nextCtx = 1;
 	m_ackedCtx = 0;
+	m_unacknowledgedOps.clear();
 	m_savedSeq = 0;
 	m_savedAt = QDateTime{};
 
@@ -288,6 +292,7 @@ void CollabSession::disconnectFromServer()
 void CollabSession::leave()
 {
 	m_reconnecting = false;
+	m_rejectedChanges = false;
 	disconnectFromServer();
 }
 
@@ -380,15 +385,19 @@ bool CollabSession::keepOfflineChanges()
 {
 	m_reconnecting = false;
 	const bool changed = m_unsentAtLoss || Engine::getSong()->isModified() || projectSnapshot() != m_offlineSnapshot;
+	const bool rejected = std::exchange(m_rejectedChanges, false);
 	m_offlineSnapshot.clear();
 	m_hadOfflineChanges = changed;
 	log(QString{"offline changes: %1"}.arg(changed ? "yes" : "no"));
 	if (!changed) { return true; }
 	auto gui = gui::getGUI();
 	if (!gui) { return true; }
-	QMessageBox box{QMessageBox::Question, tr("Back online"),
-		tr("You changed the project while the connection was lost. The project continues as it is on the server; "
-			"your version can be kept as a file of its own (to copy parts of it back, for example)."),
+	QMessageBox box{QMessageBox::Question, rejected ? tr("Project reloaded") : tr("Back online"),
+		rejected ? tr("Some of your latest changes could not be added to the shared project, so the project was "
+				"loaded again from the server (it continues as it is there). Your version, with those changes, can be "
+				"kept as a file of its own (to copy parts of it back, for example).")
+			: tr("You changed the project while the connection was lost. The project continues as it is on the server; "
+				"your version can be kept as a file of its own (to copy parts of it back, for example)."),
 		QMessageBox::NoButton, gui->mainWindow()};
 	QPushButton* save = box.addButton(tr("Save my version as a file..."), QMessageBox::AcceptRole);
 	box.addButton(tr("Discard my changes"), QMessageBox::DestructiveRole);
@@ -416,6 +425,7 @@ void CollabSession::fail(const QString& message)
 {
 	const bool wasActive = m_state != State::Disconnected;
 	m_reconnecting = false; // e.g. the server answered, but the project is gone: trying again would not help
+	m_rejectedChanges = false;
 	disconnectFromServer();
 	if (wasActive) { emit errorOccurred(message); }
 }
@@ -427,19 +437,65 @@ void CollabSession::send(const QJsonObject& message)
 }
 
 
+void CollabSession::removeClipsNotIn(const QString& mmp)
+{
+	// The project just loaded is the shared one: a clip it does not have was made by LMMS meanwhile, on this
+	// computer only (it would never be synchronized, and edits in it would be lost)
+	static const QRegularExpression cidRe{"cid=\"([0-9a-f]{16})\""};
+	QSet<collab_id_t> shared;
+	for (auto it = cidRe.globalMatch(mmp); it.hasNext();) { shared.insert(proto::parseId(it.next().captured(1))); }
+	std::vector<Track*> tracks = Engine::getSong()->tracks();
+	for (Track* track : Engine::patternStore()->tracks()) { tracks.push_back(track); }
+	for (Track* track : tracks)
+	{
+		const auto clips = track->getClips(); // a copy: clips are removed below
+		for (Clip* clip : clips)
+		{
+			// Only empty MIDI clips (what an empty Piano Roll makes): nothing with content is ever removed here
+			auto midiClip = dynamic_cast<MidiClip*>(clip);
+			if (shared.contains(clip->collabId()) || !midiClip || !midiClip->notes().empty()) { continue; }
+			log(QString{"removed empty clip %1 of track %2: not in the shared project (made while loading)"}
+				.arg(proto::idString(clip->collabId()), proto::idString(track->collabId())));
+			auto guard = Engine::audioEngine()->requestChangesGuard();
+			delete clip;
+		}
+	}
+}
+
+
+QString CollabSession::opsSummary(const QJsonArray& ops)
+{
+	static const QRegularExpression cidRe{"cid=\"([0-9a-f]{16})\""};
+	QStringList summary;
+	for (const QJsonValue& op : ops)
+	{
+		QJsonObject o = op.toObject();
+		// The XML is large and not needed to follow what happens; the id of what it holds is
+		if (const auto match = cidRe.match(o.value("xml").toString()); match.hasMatch()) { o.insert("cid", match.captured(1)); }
+		o.remove("xml");
+		summary.append(QString::fromUtf8(QJsonDocument{o}.toJson(QJsonDocument::Compact)));
+	}
+	return summary.join(" ");
+}
+
+
+void CollabSession::resyncAfterRejection()
+{
+	if (m_state != State::Live || m_reconnecting) { return; }
+	// Like a lost connection: the project is loaded again from the server, and this user's version can be kept
+	m_rejectedChanges = true;
+	startReconnecting();
+	m_unsentAtLoss = true;
+}
+
+
 void CollabSession::sendOps(const QJsonArray& ops)
 {
 	if (m_log)
 	{
-		QStringList summary;
-		for (const QJsonValue& op : ops)
-		{
-			QJsonObject o = op.toObject();
-			o.remove("xml"); // large and not needed to follow what happens
-			summary.append(QString::fromUtf8(QJsonDocument{o}.toJson(QJsonDocument::Compact)));
-		}
-		log(QString{"send ctx %1: %2"}.arg(m_nextCtx).arg(summary.join(" ")));
+		log(QString{"send ctx %1: %2"}.arg(m_nextCtx).arg(opsSummary(ops)));
 	}
+	m_unacknowledgedOps.insert(m_nextCtx, ops); // to tell what the server did not take
 	send({{"t", proto::msg::Tx}, {"ctx", m_nextCtx++}, {"ops", ops}});
 	emit syncStatusChanged();
 }
@@ -455,6 +511,20 @@ CollabSession::SyncStatus CollabSession::syncStatus() const
 void CollabSession::saveNow()
 {
 	if (m_state == State::Live) { send({{"t", proto::msg::Save}}); }
+}
+
+
+void CollabSession::createVersion(const QString& description)
+{
+	if (m_state != State::Live) { return; }
+	flushAll(); // the latest local changes go first, so they are in the version
+	send({{"t", proto::msg::VersionCreate}, {"description", description.left(proto::MaxVersionDescription)}});
+}
+
+
+void CollabSession::requestVersions()
+{
+	if (m_state == State::Live) { send({{"t", proto::msg::VersionsGet}}); }
 }
 
 
@@ -533,6 +603,18 @@ void CollabSession::handleMessage(const QJsonObject& message)
 		if (m_state == State::Live) { emit presenceReceived(message); }
 	}
 	else if (t.startsWith("asset.")) { handleAssetMessage(message); }
+	else if (t == proto::msg::VersionCreated)
+	{
+		const QJsonObject version = message.value("version").toObject();
+		log(QString{"version %1 created by %2"}.arg(version.value("id").toInt()).arg(version.value("by").toString()));
+		emit versionCreated(version);
+	}
+	else if (t == proto::msg::VersionP4)
+	{
+		emit versionPerforce(message.value("id").toInt(), message.value("p4").toObject());
+	}
+	else if (t == proto::msg::Versions) { emit versionsReceived(message.value("versions").toArray()); }
+	else if (t == proto::msg::VersionError) { emit versionError(message.value("message").toString()); }
 	else if (t == proto::msg::Saved)
 	{
 		m_savedSeq = message.value("seq").toInteger();
@@ -620,14 +702,20 @@ void CollabSession::finishJoin(const QJsonObject& message)
 		{
 			auto w = state.content ? qobject_cast<QMdiSubWindow*>(state.content->parentWidget()) : nullptr;
 			if (!w) { continue; } // e.g. an instrument window of the previous song
-			if (state.maximized) { w->showMaximized(); }
+			// Only windows that were open are shown (showing one has effects: an empty Piano Roll opens a clip)
+			if (!state.visible)
+			{
+				w->hide();
+				w->setGeometry(state.geometry);
+			}
+			else if (state.maximized) { w->showMaximized(); }
 			else
 			{
 				w->showNormal();
 				w->setGeometry(state.geometry);
 			}
-			w->setVisible(state.visible);
 		}
+		removeClipsNotIn(message.value("mmp").toString());
 	}
 	startTracking();
 	if (message.contains("mmp"))
@@ -710,8 +798,7 @@ void CollabSession::flushAll()
 void CollabSession::processTxQueue()
 {
 	if ((m_state != State::Live && m_state != State::Joining) || m_pendingJoin) { return; }
-	const auto gui = qobject_cast<QGuiApplication*>(QCoreApplication::instance());
-	if (gui && QGuiApplication::mouseButtons() != Qt::NoButton)
+	if (localGestureInProgress())
 	{
 		if (!m_txQueueTimer->isActive()) { m_txQueueTimer->start(QueueRetryIntervalMs); }
 		return;
@@ -743,6 +830,17 @@ void CollabSession::applyTx(const QJsonObject& message)
 			it = it.value() <= ctx ? m_pendingStructure.erase(it) : std::next(it);
 		}
 		paramsAcknowledged(ctx, m_seq);
+		const QJsonArray sent = m_unacknowledgedOps.value(ctx);
+		for (auto it = m_unacknowledgedOps.begin(); it != m_unacknowledgedOps.end() && it.key() <= ctx;)
+		{
+			it = m_unacknowledgedOps.erase(it);
+		}
+		if (const int rejected = message.value("rejected").toInt(); rejected > 0)
+		{
+			// The server did not take some of our changes: this model is no longer the shared project
+			log(QString{"server rejected %1 op(s) of ctx %2: %3"}.arg(rejected).arg(ctx).arg(opsSummary(sent)));
+			QTimer::singleShot(0, this, &CollabSession::resyncAfterRejection);
+		}
 		return;
 	}
 
@@ -750,14 +848,7 @@ void CollabSession::applyTx(const QJsonObject& message)
 	if (ops.isEmpty()) { return; }
 	if (m_log)
 	{
-		QStringList summary;
-		for (const QJsonValue& op : ops)
-		{
-			QJsonObject o = op.toObject();
-			o.remove("xml");
-			summary.append(QString::fromUtf8(QJsonDocument{o}.toJson(QJsonDocument::Compact)));
-		}
-		log(QString{"recv seq %1 from %2: %3"}.arg(m_seq).arg(message.value("clientId").toString(), summary.join(" ")));
+		log(QString{"recv seq %1 from %2: %3"}.arg(m_seq).arg(message.value("clientId").toString(), opsSummary(ops)));
 	}
 
 	// Send our own unsent edits first, so every baseline only holds synchronized state
