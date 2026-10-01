@@ -142,12 +142,22 @@ void setFields(QDomElement& element, const QJsonObject& values, const std::vecto
 bool ProjectState::load(const QByteArray& mmp, QString& error)
 {
 	QDomDocument doc;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
 	const auto result = doc.setContent(mmp);
 	if (!result)
 	{
 		error = QString{"invalid XML at line %1: %2"}.arg(result.errorLine).arg(result.errorMessage);
 		return false;
 	}
+#else // e.g. Ubuntu 24.04 (Qt 6.4)
+	QString message;
+	int line = 0;
+	if (!doc.setContent(mmp, &message, &line))
+	{
+		error = QString{"invalid XML at line %1: %2"}.arg(line).arg(message);
+		return false;
+	}
+#endif
 	const QDomElement root = doc.documentElement();
 	if (root.tagName() != "lmms-project" || root.firstChildElement("song").isNull())
 	{
