@@ -36,6 +36,7 @@
 #include <QWidget>
 
 class QHBoxLayout;
+class QToolButton;
 
 namespace lmms::gui
 {
@@ -135,9 +136,13 @@ public:
 
 private:
 	void rebuild();
+	void updateStatus();
+	//! Makes the menu bar place this bar again (its size changed)
+	void relayout();
 
 	CollabPresence* m_presence;
 	QHBoxLayout* m_layout;
+	QToolButton* m_status;
 };
 
 } // namespace lmms::gui

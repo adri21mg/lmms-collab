@@ -32,6 +32,8 @@
 //     open    {project}                              join an existing shared project
 //     tx      {ctx, ops[]}                           one local edit gesture (client-local counter ctx)
 //     presence {cursor, play}                        where this user is; never stored (see sanitizePresence)
+//     list    {}                                     the server's projects (M7a), answered with projects
+//     save    {}                                     save the project now (it is also saved every few seconds)
 //     asset.put {hash, size, name}                   upload of a shared file (M6a): binary frames follow
 //     asset.get {hash}                               download of a shared file
 //   server -> client
@@ -39,11 +41,14 @@
 //     joined  {project, seq, mmp?}                   mmp is omitted for the creator (it already has the song)
 //     tx      {seq, clientId, ctx, ops[]}            accepted transaction, sent to every client incl. sender
 //     presence {clientId, user, color, cursor, play} another user's presence, or {clientId, gone:true}
+//     projects {projects: [{name, modified, users}]}  modified: ISO date of the last save, users: connected now
+//     saved   {seq, at}                              the project was written to disk up to transaction seq
 //     asset.stored {hash, path}                      an upload is complete (or the file was already there)
 //     asset.data {hash, size}                        a download: binary frames follow
 //     asset.error {hash, message}
 //     error   {message}
-// hello also carries the user's color ("#rrggbb"). joined also carries the shared files: library [{path, hash, size}].
+// hello also carries the user's color ("#rrggbb"). joined also carries the shared files: library [{path, hash, size}],
+// and savedSeq: up to which transaction the project is on disk.
 // Binary frames (type 1) carry file data: [32 bytes SHA-256 of the whole file][up to AssetChunkSize bytes].
 // Shared files are named "shared:<path>" in the project, like LMMS' own "factorysample:..." paths; every client
 // keeps them in its own folder. Files are identified by their SHA-256 (the same file is stored once).
@@ -145,6 +150,10 @@ inline constexpr auto Joined = "joined";
 inline constexpr auto Tx = "tx";
 inline constexpr auto Presence = "presence";
 inline constexpr auto Error = "error";
+inline constexpr auto List = "list";
+inline constexpr auto Projects = "projects";
+inline constexpr auto Save = "save";
+inline constexpr auto Saved = "saved";
 inline constexpr auto AssetPut = "asset.put";
 inline constexpr auto AssetGet = "asset.get";
 inline constexpr auto AssetStored = "asset.stored";

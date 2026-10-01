@@ -1290,6 +1290,37 @@ private slots:
 		QVERIFY2(clip->sample().sampleSize() > 1000, "the clip plays the real file, not the placeholder");
 	}
 
+	// ---- M7a: save status, project list ----
+
+	void testSaveStatus()
+	{
+		auto session = CollabSession::instance();
+		QCOMPARE(session->state(), CollabSession::State::Live);
+		// A change is sent, then the server writes it to disk; "save now" does it at once
+		// (the project was loaded again by the tests before: a new track rather than m_clip)
+		Track::create(Track::Type::Instrument, Engine::getSong());
+		QTRY_COMPARE_WITH_TIMEOUT(session->syncStatus(), CollabSession::SyncStatus::Saving, 3000);
+		session->saveNow();
+		QTRY_COMPARE_WITH_TIMEOUT(session->syncStatus(), CollabSession::SyncStatus::Saved, 3000);
+		QVERIFY(session->lastSaved().isValid());
+
+		// The server lists its projects, with who is connected
+		FakePeer lister;
+		QVERIFY(lister.connectTo(m_port));
+		lister.send({{"t", "list"}});
+		const QJsonArray projects = lister.next("projects").value("projects").toArray();
+		bool found = false;
+		for (const QJsonValue& p : projects)
+		{
+			if (p.toObject().value("name").toString() == "session-test")
+			{
+				found = true;
+				QVERIFY(p.toObject().value("users").toInt() >= 2);
+			}
+		}
+		QVERIFY(found);
+	}
+
 private:
 	QString m_newTrackXml;
 

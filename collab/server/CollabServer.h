@@ -70,6 +70,7 @@ private:
 		QString name;
 		ProjectState state;
 		qint64 seq = 0;
+		qint64 savedSeq = 0; //!< transactions up to here are on disk
 		bool dirty = false;
 		QHash<QString, Asset> library; //!< shared files by SHA-256
 	};
@@ -105,6 +106,7 @@ private:
 	void handleOpen(Client& client, const QJsonObject& message);
 	void handleTx(Client& client, const QJsonObject& message);
 	void handlePresence(Client& client, const QJsonObject& message);
+	void handleList(Client& client);
 	void handleAssetPut(Client& client, const QJsonObject& message);
 	void handleAssetGet(Client& client, const QJsonObject& message);
 	//! A part of an uploaded file
@@ -123,6 +125,8 @@ private:
 	Project* findOrLoadProject(const QString& name);
 	QString projectDir(const QString& name) const;
 	bool saveProject(Project& project);
+	//! Tells the project's clients that it is on disk up to its current transaction
+	void announceSaved(Project& project);
 
 	QDir m_dataDir;
 	QTcpServer* m_server;

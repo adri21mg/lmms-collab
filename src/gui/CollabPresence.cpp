@@ -25,6 +25,11 @@
 #include "CollabPresence.h"
 
 #include <algorithm>
+#include <QCoreApplication>
+#include <QResizeEvent>
+#include <QMenuBar>
+#include <QDateTime>
+#include <QTimer>
 #include <cmath>
 #include <numbers>
 #include <set>
@@ -1210,8 +1215,58 @@ CollabPresenceBar::CollabPresenceBar(CollabPresence* presence, QWidget* parent) 
 {
 	m_layout->setContentsMargins(0, 0, 6, 0);
 	m_layout->setSpacing(10);
+	// Always as high as the menu bar's own items, whoever is shown: otherwise the menu bar grows when someone
+	// joins and the whole window moves down a little
+	setFixedHeight(fontMetrics().height() + 6);
+	// Whether the work is safe on the server; a click saves right now
+	m_status = new QToolButton(this);
+	m_status->setAutoRaise(true);
+	m_status->setFixedHeight(height());
+	m_layout->addWidget(m_status);
+	connect(m_status, &QToolButton::clicked, this, [] { collab::CollabSession::instance()->saveNow(); });
+	auto session = collab::CollabSession::instance();
+	connect(session, &collab::CollabSession::syncStatusChanged, this, &CollabPresenceBar::updateStatus);
+	connect(session, &collab::CollabSession::stateChanged, this, &CollabPresenceBar::updateStatus);
+	// "saved 5 s ago" ages
+	auto clock = new QTimer(this);
+	connect(clock, &QTimer::timeout, this, &CollabPresenceBar::updateStatus);
+	clock->start(1000);
 	connect(presence, &CollabPresence::usersChanged, this, &CollabPresenceBar::rebuild);
+	updateStatus();
 	rebuild();
+}
+
+
+void CollabPresenceBar::updateStatus()
+{
+	auto session = collab::CollabSession::instance();
+	const bool live = session->state() == collab::CollabSession::State::Live;
+	if (m_status->isVisibleTo(this) != live)
+	{
+		m_status->setVisible(live);
+		relayout();
+	}
+	if (!live) { return; }
+	QString text;
+	switch (session->syncStatus())
+	{
+	case collab::CollabSession::SyncStatus::Sending: text = tr("Sending..."); break;
+	case collab::CollabSession::SyncStatus::Saving: text = tr("Saving..."); break;
+	case collab::CollabSession::SyncStatus::Saved:
+	{
+		const QDateTime saved = session->lastSaved();
+		const qint64 ago = saved.isValid() ? saved.secsTo(QDateTime::currentDateTime()) : -1;
+		text = QString{QChar{0x2713}} + " " + (ago < 0 ? tr("Saved") : ago < 60 ? tr("Saved %1 s ago").arg(ago)
+			: tr("Saved at %1").arg(saved.toString("HH:mm")));
+		break;
+	}
+	}
+	if (m_status->text() != text)
+	{
+		m_status->setText(text);
+		relayout();
+	}
+	m_status->setToolTip(tr("Your work on the server. Click to save on the server now (it also saves itself every few seconds)."));
 }
 
 
@@ -1220,11 +1275,13 @@ void CollabPresenceBar::rebuild()
 	const auto& users = m_presence->users();
 	// One button per collaborator; texts are updated in place (this runs up to 30 times per second)
 	auto buttons = findChildren<QToolButton*>(QString{}, Qt::FindDirectChildrenOnly);
+	buttons.removeAll(m_status); // the save status is not a collaborator
 	while (buttons.size() > static_cast<qsizetype>(users.size())) { delete buttons.takeLast(); }
 	while (buttons.size() < static_cast<qsizetype>(users.size()))
 	{
 		auto button = new QToolButton(this);
 		button->setAutoRaise(true);
+		button->setFixedHeight(height());
 		button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 		button->setToolTip(tr("Click to go where this collaborator is"));
 		connect(button, &QToolButton::clicked, this, [this, button] {
@@ -1255,7 +1312,22 @@ void CollabPresenceBar::rebuild()
 		}
 		button->setProperty("clientId", id);
 	}
+	relayout();
+}
+
+
+void CollabPresenceBar::relayout()
+{
+	// The menu bar places its corner widget only when it is resized itself: a corner widget that grew would
+	// stay partly outside a maximized window (this runs often: only when the size really changed)
+	const QSize before = size();
 	adjustSize();
+	if (size() == before) { return; }
+	if (auto menuBar = qobject_cast<QMenuBar*>(parentWidget()))
+	{
+		QResizeEvent resize{menuBar->size(), menuBar->size()};
+		QCoreApplication::sendEvent(menuBar, &resize);
+	}
 }
 
 } // namespace lmms::gui

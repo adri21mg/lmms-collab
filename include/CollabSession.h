@@ -31,6 +31,7 @@
 #include <optional>
 
 #include <QHash>
+#include <QDateTime>
 #include <QDomElement>
 #include <QJsonArray>
 #include <QElapsedTimer>
@@ -110,6 +111,14 @@ public:
 		Live
 	};
 
+	//! Whether this user's work is safe on the server
+	enum class SyncStatus
+	{
+		Sending, //!< local changes not acknowledged by the server yet
+		Saving,  //!< everything arrived; the server writes it to disk within a few seconds
+		Saved    //!< on the server's disk
+	};
+
 	enum class JoinMode
 	{
 		Create, //!< share the current song as a new project
@@ -130,6 +139,11 @@ public:
 	QString projectName() const { return m_project; }
 	QString userName() const { return m_user; }
 	bool isApplyingRemote() const { return m_applyingRemote; }
+	SyncStatus syncStatus() const;
+	//! When the server last wrote the project to disk (invalid if not yet in this session)
+	QDateTime lastSaved() const { return m_savedAt; }
+	//! Asks the server to write the project to disk now
+	void saveNow();
 
 	//! Sends local changes right away instead of at the next throttle tick (used by tests)
 	void flushAll();
@@ -141,6 +155,7 @@ public:
 
 signals:
 	void stateChanged();
+	void syncStatusChanged();
 	void errorOccurred(const QString& message);
 	//! Another user's presence changed ({clientId, user, color, cursor, play} or {clientId, gone})
 	void presenceReceived(const QJsonObject& presence);
@@ -432,6 +447,9 @@ private:
 	QString m_clientId;
 	qint64 m_seq = 0;
 	qint64 m_nextCtx = 1;
+	qint64 m_ackedCtx = 0;   //!< our latest transaction the server acknowledged
+	qint64 m_savedSeq = 0;   //!< the server's disk holds the project up to this transaction
+	QDateTime m_savedAt;
 	bool m_applyingRemote = false;
 	bool m_loadingSnapshot = false;
 

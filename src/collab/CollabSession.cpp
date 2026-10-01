@@ -205,6 +205,9 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 	m_joinMode = mode;
 	m_seq = 0;
 	m_nextCtx = 1;
+	m_ackedCtx = 0;
+	m_savedSeq = 0;
+	m_savedAt = QDateTime{};
 
 	m_socket = std::make_unique<QTcpSocket>();
 	connect(m_socket.get(), &QTcpSocket::connected, this, [this] {
@@ -303,6 +306,20 @@ void CollabSession::sendOps(const QJsonArray& ops)
 		log(QString{"send ctx %1: %2"}.arg(m_nextCtx).arg(summary.join(" ")));
 	}
 	send({{"t", proto::msg::Tx}, {"ctx", m_nextCtx++}, {"ops", ops}});
+	emit syncStatusChanged();
+}
+
+
+CollabSession::SyncStatus CollabSession::syncStatus() const
+{
+	if (m_ackedCtx < m_nextCtx - 1) { return SyncStatus::Sending; }
+	return m_savedSeq >= m_seq ? SyncStatus::Saved : SyncStatus::Saving;
+}
+
+
+void CollabSession::saveNow()
+{
+	if (m_state == State::Live) { send({{"t", proto::msg::Save}}); }
 }
 
 
@@ -381,6 +398,12 @@ void CollabSession::handleMessage(const QJsonObject& message)
 		if (m_state == State::Live) { emit presenceReceived(message); }
 	}
 	else if (t.startsWith("asset.")) { handleAssetMessage(message); }
+	else if (t == proto::msg::Saved)
+	{
+		m_savedSeq = message.value("seq").toInteger();
+		m_savedAt = QDateTime::currentDateTime();
+		emit syncStatusChanged();
+	}
 	else if (t == proto::msg::Error) { fail(message.value("message").toString()); }
 }
 
@@ -401,6 +424,8 @@ void CollabSession::sendPresence(const QJsonObject& presence)
 void CollabSession::handleJoined(const QJsonObject& message)
 {
 	m_seq = message.value("seq").toInteger();
+	m_savedSeq = message.value("savedSeq").toInteger();
+	m_savedAt = m_savedSeq >= m_seq ? QDateTime::currentDateTime() : QDateTime{};
 	// Shared files: "shared:" paths of the project resolve to this project's library folder
 	setLibrary(message.value("library").toArray());
 	const QStringList missing = message.contains("mmp") ? missingFiles() : QStringList{};
@@ -563,6 +588,8 @@ void CollabSession::applyTx(const QJsonObject& message)
 	{
 		// Acknowledgement of our own transaction: our writes up to ctx are now ordered by the server
 		const qint64 ctx = message.value("ctx").toInteger();
+		m_ackedCtx = std::max(m_ackedCtx, ctx);
+		emit syncStatusChanged();
 		for (auto it = m_pending.begin(); it != m_pending.end();)
 		{
 			for (auto& fieldCtx : it.value())

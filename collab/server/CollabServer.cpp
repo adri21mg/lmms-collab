@@ -173,6 +173,11 @@ void CollabServer::handleMessage(Client& client, const QJsonObject& message)
 	{
 		sendError(client, "expected hello");
 	}
+	else if (t == proto::msg::List) { handleList(client); }
+	else if (t == proto::msg::Save)
+	{
+		if (client.project && (!client.project->dirty || saveProject(*client.project))) { announceSaved(*client.project); }
+	}
 	else if (t == proto::msg::Create) { handleCreate(client, message); }
 	else if (t == proto::msg::Open) { handleOpen(client, message); }
 	else if (t == proto::msg::Tx) { handleTx(client, message); }
@@ -204,7 +209,8 @@ void CollabServer::handleCreate(Client& client, const QJsonObject& message)
 	client.project = p;
 	qInfo("[%s] %s created project \"%s\" (%d pattern clips)", qPrintable(client.clientId), qPrintable(client.user),
 		qPrintable(name), p->state.clipCount());
-	send(client, {{"t", proto::msg::Joined}, {"project", name}, {"seq", p->seq}, {"library", libraryList(*p)}});
+	send(client, {{"t", proto::msg::Joined}, {"project", name}, {"seq", p->seq}, {"library", libraryList(*p)},
+		{"savedSeq", p->savedSeq}});
 	sendPresenceOfOthers(client);
 }
 
@@ -219,7 +225,7 @@ void CollabServer::handleOpen(Client& client, const QJsonObject& message)
 	qInfo("[%s] %s opened project \"%s\" at seq %lld", qPrintable(client.clientId), qPrintable(client.user),
 		qPrintable(name), p->seq);
 	send(client, {{"t", proto::msg::Joined}, {"project", name}, {"seq", p->seq},
-		{"mmp", QString::fromUtf8(p->state.toMmp())}, {"library", libraryList(*p)}});
+		{"mmp", QString::fromUtf8(p->state.toMmp())}, {"library", libraryList(*p)}, {"savedSeq", p->savedSeq}});
 	sendPresenceOfOthers(client);
 }
 
@@ -507,6 +513,7 @@ CollabServer::Project* CollabServer::findOrLoadProject(const QString& name)
 			}
 		}
 	}
+	project->savedSeq = project->seq;
 	qInfo("Loaded project \"%s\" from disk (seq %lld)", qPrintable(name), project->seq);
 	Project* p = project.get();
 	m_projects[name] = std::move(project);
@@ -536,7 +543,41 @@ bool CollabServer::saveProject(Project& project)
 		return false;
 	}
 	project.dirty = false;
+	project.savedSeq = project.seq;
 	return true;
+}
+
+
+void CollabServer::announceSaved(Project& project)
+{
+	broadcast(&project, {{"t", proto::msg::Saved}, {"seq", project.savedSeq},
+		{"at", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}});
+}
+
+
+void CollabServer::handleList(Client& client)
+{
+	// Projects on disk, and new ones not saved yet
+	QStringList names = QDir{m_dataDir.filePath("projects")}.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+	for (const auto& [name, project] : m_projects)
+	{
+		if (!names.contains(name)) { names.append(name); }
+	}
+	QJsonArray projects;
+	for (const QString& name : names)
+	{
+		if (!isValidProjectName(name)) { continue; }
+		const QFileInfo live{projectDir(name) + "/" + LiveFile};
+		if (!live.exists() && !m_projects.count(name)) { continue; }
+		int users = 0;
+		for (const auto& [socket, other] : m_clients)
+		{
+			if (other.project && other.project->name == name) { ++users; }
+		}
+		projects.append(QJsonObject{{"name", name},
+			{"modified", live.exists() ? live.lastModified().toUTC().toString(Qt::ISODate) : QString{}}, {"users", users}});
+	}
+	send(client, {{"t", proto::msg::Projects}, {"projects", projects}});
 }
 
 
@@ -547,6 +588,7 @@ void CollabServer::saveAll()
 		if (project->dirty && saveProject(*project))
 		{
 			qInfo("Saved project \"%s\" (seq %lld)", qPrintable(name), project->seq);
+			announceSaved(*project);
 		}
 	}
 }

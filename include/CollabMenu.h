@@ -27,6 +27,8 @@
 
 #include <QMenu>
 
+class QProcess;
+
 namespace lmms::gui
 {
 
@@ -41,10 +43,19 @@ public:
 private:
 	void showConnectDialog();
 	void updateState();
+	//! "Host a session": the collaboration server, run by this LMMS for as long as it is open; error text or ""
+	QString startHosting();
+	void stopHosting();
+	bool isHosting() const;
+	//! Addresses of this computer others can connect to (Tailscale first)
+	static QString hostAddresses();
 
 	MainWindow* m_mainWindow;
 	QAction* m_connectAction;
 	QAction* m_disconnectAction;
+	QAction* m_saveAction;
+	QAction* m_stopHostingAction;
+	QProcess* m_hostServer = nullptr;
 	QAction* m_statusAction;
 };
 
