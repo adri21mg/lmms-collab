@@ -31,6 +31,7 @@
 #include <optional>
 #include <thread>
 
+#include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -64,6 +65,10 @@ public:
 	static bool isValidProjectName(const QString& name);
 	//! Versions are also submitted to Perforce
 	void setPerforce(const P4Exporter::Config& config);
+	//! Clients must prove they know the password (proto::passwordKey of it) before anything else
+	void setPasswordKey(const QByteArray& key) { m_passwordKey = key; }
+	//! Connections are encrypted (TLS) with this certificate and key (PEM files); call before listen()
+	bool setTls(const QString& certificateFile, const QString& keyFile);
 
 private:
 	struct Project
@@ -102,12 +107,20 @@ private:
 		QElapsedTimer presenceForwarded;
 		bool presencePending = false;
 		std::map<QString, Upload> uploads; //!< by SHA-256
+		bool authenticated = false;    //!< knows the password (or the server has none)
+		QByteArray challenge;          //!< sent in auth, until answered
+		bool receivedData = false;
 	};
 
 	void onNewConnection();
 	void onReadyRead(QTcpSocket* socket);
 	void onDisconnected(QTcpSocket* socket);
 	void handleMessage(Client& client, const QJsonObject& message);
+	void handleHello(Client& client, const QJsonObject& message);
+	void handleAuth(Client& client, const QJsonObject& message);
+	void welcome(Client& client);
+	//! Seconds this address must wait after repeated wrong passwords (0: none)
+	int authBlockedFor(const QString& address) const;
 	void handleCreate(Client& client, const QJsonObject& message);
 	void handleOpen(Client& client, const QJsonObject& message);
 	void handleTx(Client& client, const QJsonObject& message);
@@ -152,6 +165,14 @@ private:
 	std::map<QTcpSocket*, Client> m_clients;
 	std::map<QString, std::unique_ptr<Project>> m_projects;
 	int m_nextClientNumber = 1;
+	QByteArray m_passwordKey;
+	bool m_tls = false;
+	struct AuthFailures
+	{
+		int count = 0;
+		QDateTime last;
+	};
+	QHash<QString, AuthFailures> m_authFailures; //!< by peer address
 
 	struct P4Job
 	{

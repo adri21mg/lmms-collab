@@ -47,6 +47,7 @@
 #include <QScopeGuard>
 #include <QTime>
 #include <QTcpSocket>
+#include <QSslSocket>
 #include <QTemporaryDir>
 #include <QTextStream>
 #include <QTimer>
@@ -194,7 +195,7 @@ CollabSession::~CollabSession()
 // Connection
 
 void CollabSession::connectToServer(const QString& host, quint16 port, const QString& user,
-	const QString& project, JoinMode mode, const QString& color)
+	const QString& project, JoinMode mode, const QString& color, const QByteArray& passwordKey)
 {
 	disconnectFromServer();
 	m_user = user;
@@ -223,10 +224,44 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 	m_savedSeq = 0;
 	m_savedAt = QDateTime{};
 
-	m_socket = std::make_unique<QTcpSocket>();
-	connect(m_socket.get(), &QTcpSocket::connected, this, [this] {
-		send({{"t", proto::msg::Hello}, {"proto", proto::Version}, {"user", m_user}, {"color", m_color}});
-	});
+	m_passwordKey = passwordKey;
+	m_encrypted = false;
+	m_fingerprint.clear();
+
+	// Encryption, the server's certificate and the password first (see CollabConnection)
+	m_connection = std::make_unique<CollabConnection>();
+	connect(m_connection.get(), &CollabConnection::ready, this, &CollabSession::onConnected);
+	connect(m_connection.get(), &CollabConnection::failed, this,
+		[this](CollabConnection::Failure failure, const QString& message) {
+			const QString fingerprint = m_connection ? m_connection->fingerprint() : QString{};
+			if (m_connection) { m_connection.release()->deleteLater(); } // this runs inside its own signal
+			// A session that was going on (or is being got back) tries again while the server cannot be reached
+			if (failure == CollabConnection::Failure::Network && (m_state == State::Live || m_reconnecting))
+			{
+				return startReconnecting();
+			}
+			log("connection failed: " + message);
+			if (failure == CollabConnection::Failure::CertificateChanged)
+			{
+				emit serverCertificateChanged(m_host, m_port, fingerprint);
+			}
+			fail(failure == CollabConnection::Failure::Network ? tr("Connection error: %1").arg(message) : message);
+		});
+	setState(State::Connecting);
+	m_connection->open(host, port, {{"t", proto::msg::Hello}, {"proto", proto::Version}, {"user", m_user},
+		{"color", m_color}}, passwordKey);
+}
+
+
+void CollabSession::onConnected(const QJsonObject& welcome)
+{
+	QByteArray rest;
+	m_socket = m_connection->takeSocket(rest);
+	m_encrypted = m_connection->isEncrypted();
+	m_fingerprint = m_connection->fingerprint();
+	m_connection.release()->deleteLater(); // this runs inside its own signal
+	log(m_encrypted ? "connection encrypted, server certificate " + m_fingerprint : QString{"connection not encrypted"});
+
 	connect(m_socket.get(), &QTcpSocket::readyRead, this, &CollabSession::onReadyRead);
 	connect(m_socket.get(), &QTcpSocket::disconnected, this, [this] {
 		if (m_state == State::Live) { startReconnecting(); }
@@ -236,8 +271,12 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 		if (m_state == State::Live || m_reconnecting) { return startReconnecting(); }
 		fail(tr("Connection error: %1").arg(m_socket ? m_socket->errorString() : QString{}));
 	});
-	setState(State::Connecting);
-	m_socket->connectToHost(host, port);
+	handleMessage(welcome);
+	if (!rest.isEmpty() && m_socket)
+	{
+		m_decoder.append(rest);
+		onReadyRead();
+	}
 }
 
 
@@ -277,6 +316,11 @@ void CollabSession::disconnectFromServer()
 	if (m_downloadProgress) { m_downloadProgress->close(); }
 	emit presenceCleared();
 	refreshSharedFiles(); // back to LMMS' own files
+	if (m_connection)
+	{
+		m_connection->disconnect(this);
+		m_connection.release()->deleteLater(); // may run inside one of its signals
+	}
 	if (m_socket)
 	{
 		// This may run inside one of the socket's own signal handlers, so delete it later
@@ -334,7 +378,7 @@ void CollabSession::startReconnecting()
 	QTimer::singleShot(m_reconnectAttempts == 1 ? 1000 : 3000, this, [=, this] {
 		if (m_reconnecting && m_state == State::Reconnecting)
 		{
-			connectToServer(host, port, user, project, JoinMode::Open, color);
+			connectToServer(host, port, user, project, JoinMode::Open, color, m_passwordKey);
 		}
 	});
 }

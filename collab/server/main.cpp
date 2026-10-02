@@ -28,6 +28,8 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
+#include <QHostAddress>
 #include <QSysInfo>
 #include <QTimer>
 
@@ -94,6 +96,12 @@ int main(int argc, char* argv[])
 	parser.addOption(listenOption);
 	parser.addOption(dataOption);
 	for (const auto& option : {p4PortOption, p4UserOption, p4DepotOption, p4ClientOption}) { parser.addOption(option); }
+	// Security: a password (also from the environment variable LMMS_COLLAB_PASSWORD) and encryption
+	const QCommandLineOption passwordFileOption{"password-file", "File whose first line is the password everybody "
+		"needs to connect (or set LMMS_COLLAB_PASSWORD).", "file"};
+	const QCommandLineOption tlsCertOption{"tls-cert", "Encrypt connections (TLS) with this certificate (PEM).", "file"};
+	const QCommandLineOption tlsKeyOption{"tls-key", "The certificate's private key (PEM).", "file"};
+	for (const auto& option : {passwordFileOption, tlsCertOption, tlsKeyOption}) { parser.addOption(option); }
 	parser.process(app);
 
 	bool portOk = false;
@@ -124,6 +132,30 @@ int main(int argc, char* argv[])
 		server.setPerforce(p4);
 		qInfo("Versions are also submitted to Perforce %s as %s into %s (workspace %s)", qPrintable(p4.port),
 			qPrintable(p4.user), qPrintable(p4.depot), qPrintable(p4.client));
+	}
+	QString password = qEnvironmentVariable("LMMS_COLLAB_PASSWORD");
+	if (parser.isSet(passwordFileOption))
+	{
+		QFile file{parser.value(passwordFileOption)};
+		if (!file.open(QIODevice::ReadOnly))
+		{
+			qCritical("Cannot read the password file %s", qPrintable(parser.value(passwordFileOption)));
+			return 1;
+		}
+		password = QString::fromUtf8(file.readLine()).trimmed();
+	}
+	if (!password.isEmpty())
+	{
+		server.setPasswordKey(lmms::collab::proto::passwordKey(password));
+		qInfo("A password is needed to connect");
+	}
+	else if (!QHostAddress{parser.value(listenOption)}.isLoopback())
+	{
+		qWarning("No password: anyone who can reach this server can join its projects (see --password-file)");
+	}
+	if (parser.isSet(tlsCertOption) || parser.isSet(tlsKeyOption))
+	{
+		if (!server.setTls(parser.value(tlsCertOption), parser.value(tlsKeyOption))) { return 1; }
 	}
 	if (!server.listen(parser.value(listenOption), static_cast<quint16>(port))) { return 1; }
 

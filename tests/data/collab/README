@@ -1,0 +1,2 @@
+Self-signed certificates used only by CollabSessionTest (encrypted connections, a certificate that changes).
+Never use them for a real server.

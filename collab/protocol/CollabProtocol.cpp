@@ -34,6 +34,8 @@
 #include <QStringList>
 #include <QRegularExpression>
 #include <QtEndian>
+#include <QCryptographicHash>
+#include <QMessageAuthenticationCode>
 
 namespace lmms::collab::proto
 {
@@ -99,7 +101,7 @@ bool FrameDecoder::next(FrameType& type, QByteArray& payload)
 
 	const auto length = qFromBigEndian<quint32>(m_buffer.constData());
 	const auto rawType = static_cast<quint8>(m_buffer[4]);
-	if (length > MaxFrameSize || rawType > static_cast<quint8>(FrameType::Binary))
+	if (length > m_maxFrameSize || rawType > static_cast<quint8>(FrameType::Binary))
 	{
 		m_error = true;
 		m_buffer.clear();
@@ -111,6 +113,18 @@ bool FrameDecoder::next(FrameType& type, QByteArray& payload)
 	payload = m_buffer.mid(HeaderSize, static_cast<qsizetype>(length));
 	m_buffer.remove(0, HeaderSize + static_cast<qsizetype>(length));
 	return true;
+}
+
+
+QByteArray passwordKey(const QString& password)
+{
+	return QCryptographicHash::hash(("lmms-collab:" + password).toUtf8(), QCryptographicHash::Sha256);
+}
+
+
+QByteArray authResponse(const QByteArray& key, const QByteArray& challenge)
+{
+	return QMessageAuthenticationCode::hash(challenge, key, QCryptographicHash::Sha256);
 }
 
 

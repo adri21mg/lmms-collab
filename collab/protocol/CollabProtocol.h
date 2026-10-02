@@ -120,6 +120,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <QByteArray>
@@ -129,10 +130,12 @@
 namespace lmms::collab::proto
 {
 
-inline constexpr int Version = 1;
+inline constexpr int Version = 2; // 2: password (auth), TLS
 inline constexpr quint16 DefaultPort = 42871;
 //! Largest accepted frame (a full project snapshot must fit)
 inline constexpr quint32 MaxFrameSize = 256u * 1024u * 1024u;
+//! Largest frame before a client has proven it knows the server's password (hello, auth)
+inline constexpr quint32 MaxUnauthenticatedFrameSize = 64u * 1024u;
 
 enum class FrameType : quint8
 {
@@ -144,6 +147,12 @@ namespace msg
 {
 inline constexpr auto Hello = "hello";
 inline constexpr auto Welcome = "welcome";
+/**
+ * Password (server option): after hello the server sends auth {challenge: 64 hex digits, random}. The client
+ * answers auth {response: authResponse(passwordKey(password), challenge) as hex}; the password itself never
+ * travels. Right: welcome. Wrong: error, and the connection is closed (repeated failures make a client wait).
+ */
+inline constexpr auto Auth = "auth";
 inline constexpr auto Create = "create";
 inline constexpr auto Open = "open";
 inline constexpr auto Joined = "joined";
@@ -324,10 +333,19 @@ bool validFields(const QJsonObject& values, const std::vector<FieldSpec>& spec);
 QByteArray encodeJsonFrame(const QJsonObject& message);
 
 //! Incrementally splits a byte stream into frames
+//! What a password is turned into before use (clients may store this instead of the password)
+QByteArray passwordKey(const QString& password);
+//! The answer to a server's challenge: HMAC-SHA256 of the challenge with the password key
+QByteArray authResponse(const QByteArray& key, const QByteArray& challenge);
+
 class FrameDecoder
 {
 public:
 	void append(const QByteArray& data);
+	//! Frames larger than this are a framing error (default MaxFrameSize)
+	void setMaxFrameSize(quint32 size) { m_maxFrameSize = size; }
+	//! Bytes received but not taken as frames yet (e.g. to hand the stream over)
+	QByteArray takeBuffer() { return std::exchange(m_buffer, QByteArray{}); }
 	//! Takes the next complete frame. Returns false if none is complete yet or the stream is invalid.
 	bool next(FrameType& type, QByteArray& payload);
 	//! The peer violated the framing (oversized frame or unknown type); the connection should be closed
@@ -336,6 +354,7 @@ public:
 private:
 	QByteArray m_buffer;
 	bool m_error = false;
+	quint32 m_maxFrameSize = MaxFrameSize;
 };
 
 //! Parses a JSON frame payload; returns nullopt unless it is a JSON object with a string "t"

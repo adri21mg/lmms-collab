@@ -11,9 +11,10 @@ Group=lmms-collab
 Environment=LISTEN=0.0.0.0
 Environment=PORT=42871
 Environment=P4ARGS=
+Environment=SECARGS=
 EnvironmentFile=-/etc/default/lmms-collab-server
-# $P4ARGS without braces: split into separate arguments
-ExecStart=/usr/local/bin/lmms-collab-server --listen ${LISTEN} --port ${PORT} --data /var/lib/lmms-collab $P4ARGS
+# $P4ARGS and $SECARGS (password, encryption) without braces: split into separate arguments
+ExecStart=/usr/local/bin/lmms-collab-server --listen ${LISTEN} --port ${PORT} --data /var/lib/lmms-collab $SECARGS $P4ARGS
 # Saves every project on stop (SIGTERM)
 KillSignal=SIGTERM
 TimeoutStopSec=20

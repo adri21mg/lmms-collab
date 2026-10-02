@@ -34,6 +34,12 @@
 #include <QSaveFile>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QRandomGenerator>
+#include <QSslCertificate>
+#include <QSslConfiguration>
+#include <QSslKey>
+#include <QSslServer>
+#include <QSslSocket>
 
 #include <algorithm>
 
@@ -49,6 +55,10 @@ const QString LibraryFile = "library.json";
 const QString LibraryDir = "library";
 const QString VersionsDir = "versions";
 constexpr int MaxUploadsPerClient = 8;
+// Wrong passwords: after this many from one address, it waits a while before trying again
+constexpr int AuthFailuresAllowed = 5;
+constexpr int AuthBlockSeconds = 60;
+constexpr int AuthFailureMemorySeconds = 10 * 60;
 }
 
 
@@ -74,6 +84,51 @@ CollabServer::~CollabServer()
 void CollabServer::setPerforce(const P4Exporter::Config& config)
 {
 	m_p4 = config;
+}
+
+
+bool CollabServer::setTls(const QString& certificateFile, const QString& keyFile)
+{
+	if (!QSslSocket::supportsSsl())
+	{
+		qCritical("Encryption (TLS) is not available here: %s", qPrintable(QSslSocket::activeBackend()));
+		return false;
+	}
+	QFile certFile{certificateFile};
+	QFile key{keyFile};
+	if (!certFile.open(QIODevice::ReadOnly) || !key.open(QIODevice::ReadOnly))
+	{
+		qCritical("Cannot read the certificate %s or its key %s", qPrintable(certificateFile), qPrintable(keyFile));
+		return false;
+	}
+	const QSslCertificate certificate{certFile.readAll(), QSsl::Pem};
+	const QByteArray keyData = key.readAll();
+	QSslKey privateKey{keyData, QSsl::Ec, QSsl::Pem};
+	if (privateKey.isNull()) { privateKey = QSslKey{keyData, QSsl::Rsa, QSsl::Pem}; }
+	if (certificate.isNull() || privateKey.isNull())
+	{
+		qCritical("The certificate %s or its key %s is not usable", qPrintable(certificateFile), qPrintable(keyFile));
+		return false;
+	}
+	QSslConfiguration configuration = QSslConfiguration::defaultConfiguration();
+	configuration.setLocalCertificate(certificate);
+	configuration.setPrivateKey(privateKey);
+	configuration.setProtocol(QSsl::TlsV1_2OrLater);
+	configuration.setPeerVerifyMode(QSslSocket::VerifyNone); // clients have no certificates
+
+	auto server = new QSslServer(this);
+	server->setSslConfiguration(configuration);
+	delete m_server;
+	m_server = server;
+	connect(m_server, &QTcpServer::pendingConnectionAvailable, this, &CollabServer::onNewConnection);
+	connect(server, &QSslServer::errorOccurred, this, [](QSslSocket* socket, QAbstractSocket::SocketError) {
+		qInfo("TLS connection from %s failed: %s", qPrintable(socket->peerAddress().toString()),
+			qPrintable(socket->errorString()));
+	});
+	m_tls = true;
+	qInfo("Connections are encrypted (TLS), certificate SHA-256 %s",
+		certificate.digest(QCryptographicHash::Sha256).toHex(':').constData());
+	return true;
 }
 
 
@@ -104,6 +159,8 @@ void CollabServer::onNewConnection()
 		Client& client = m_clients[socket];
 		client.socket = socket;
 		client.clientId = QString{"c%1"}.arg(m_nextClientNumber++);
+		// Until it proves it may be here, nothing large is read from it
+		client.decoder.setMaxFrameSize(proto::MaxUnauthenticatedFrameSize);
 		connect(socket, &QTcpSocket::readyRead, this, [this, socket] { onReadyRead(socket); });
 		connect(socket, &QTcpSocket::disconnected, this, [this, socket] { onDisconnected(socket); });
 		qInfo("[%s] connected from %s", qPrintable(client.clientId), qPrintable(socket->peerAddress().toString()));
@@ -135,13 +192,22 @@ void CollabServer::onReadyRead(QTcpSocket* socket)
 	if (it == m_clients.end()) { return; }
 	Client& client = it->second;
 
-	client.decoder.append(socket->readAll());
+	const QByteArray data = socket->readAll();
+	if (!client.receivedData && !m_tls && data.startsWith(QByteArrayView{"\x16\x03", 2}))
+	{
+		// A TLS handshake: LMMS tries an encrypted connection first, and connects again without encryption
+		socket->abort();
+		return;
+	}
+	client.receivedData = true;
+	client.decoder.append(data);
 	proto::FrameType type;
 	QByteArray payload;
 	while (client.decoder.next(type, payload))
 	{
 		if (type == proto::FrameType::Binary)
 		{
+			if (!client.authenticated) { socket->abort(); return; }
 			handleBinary(client, payload);
 			if (m_clients.find(socket) == m_clients.end()) { return; }
 			continue;
@@ -167,24 +233,15 @@ void CollabServer::onReadyRead(QTcpSocket* socket)
 void CollabServer::handleMessage(Client& client, const QJsonObject& message)
 {
 	const QString t = message.value("t").toString();
-	if (t == proto::msg::Hello)
+	if (t == proto::msg::Hello) { return handleHello(client, message); }
+	if (t == proto::msg::Auth) { return handleAuth(client, message); }
+	if (client.user.isEmpty() || !client.authenticated)
 	{
-		if (message.value("proto").toInt() != proto::Version)
-		{
-			sendError(client, QString{"protocol version mismatch (server %1)"}.arg(proto::Version));
-			client.socket->disconnectFromHost();
-			return;
-		}
-		client.user = message.value("user").toString().left(64);
-		if (const auto color = proto::validColor(message.value("color"))) { client.color = *color; }
-		qInfo("[%s] hello from %s", qPrintable(client.clientId), qPrintable(client.user));
-		send(client, {{"t", proto::msg::Welcome}, {"proto", proto::Version}, {"clientId", client.clientId}});
+		sendError(client, client.user.isEmpty() ? "expected hello" : "expected the password");
+		client.socket->disconnectFromHost();
+		return;
 	}
-	else if (client.user.isEmpty())
-	{
-		sendError(client, "expected hello");
-	}
-	else if (t == proto::msg::List) { handleList(client); }
+	if (t == proto::msg::List) { handleList(client); }
 	else if (t == proto::msg::Save)
 	{
 		if (client.project && (!client.project->dirty || saveProject(*client.project))) { announceSaved(*client.project); }
@@ -199,6 +256,86 @@ void CollabServer::handleMessage(Client& client, const QJsonObject& message)
 	else if (t == proto::msg::VersionsGet) { handleVersionsGet(client); }
 	else if (t == proto::msg::VersionRestore) { handleVersionRestore(client, message); }
 	else { sendError(client, "unknown message type " + t.left(32)); }
+}
+
+
+void CollabServer::handleHello(Client& client, const QJsonObject& message)
+{
+	if (!client.user.isEmpty()) { return sendError(client, "hello was already sent"); }
+	if (message.value("proto").toInt() != proto::Version)
+	{
+		sendError(client, QString{"protocol version mismatch (server %1): this LMMS and the server are different "
+			"versions"}.arg(proto::Version));
+		client.socket->disconnectFromHost();
+		return;
+	}
+	client.user = message.value("user").toString().left(64);
+	if (client.user.isEmpty()) { client.user = "?"; }
+	if (const auto color = proto::validColor(message.value("color"))) { client.color = *color; }
+	qInfo("[%s] hello from %s", qPrintable(client.clientId), qPrintable(client.user));
+	if (m_passwordKey.isEmpty()) { return welcome(client); }
+
+	const QString address = client.socket->peerAddress().toString();
+	if (const int wait = authBlockedFor(address); wait > 0)
+	{
+		sendError(client, QString{"too many wrong passwords: try again in %1 seconds"}.arg(wait));
+		client.socket->disconnectFromHost();
+		return;
+	}
+	client.challenge.resize(32);
+	QRandomGenerator::system()->fillRange(reinterpret_cast<quint32*>(client.challenge.data()), 32 / sizeof(quint32));
+	send(client, {{"t", proto::msg::Auth}, {"challenge", QString::fromLatin1(client.challenge.toHex())}});
+}
+
+
+void CollabServer::handleAuth(Client& client, const QJsonObject& message)
+{
+	if (client.challenge.isEmpty() || client.authenticated) { return sendError(client, "unexpected auth"); }
+	const QByteArray response = QByteArray::fromHex(message.value("response").toString().toLatin1());
+	const QByteArray expected = proto::authResponse(m_passwordKey, client.challenge);
+	client.challenge.clear(); // one answer per challenge
+	// Compared in constant time: how long it takes says nothing about how close a guess was
+	bool same = response.size() == expected.size();
+	unsigned char difference = 0;
+	for (qsizetype i = 0; same && i < expected.size(); ++i) { difference |= response[i] ^ expected[i]; }
+	same = same && difference == 0;
+
+	const QString address = client.socket->peerAddress().toString();
+	if (!same)
+	{
+		AuthFailures& failures = m_authFailures[address];
+		if (failures.last.isValid() && failures.last.secsTo(QDateTime::currentDateTimeUtc()) > AuthFailureMemorySeconds)
+		{
+			failures.count = 0;
+		}
+		++failures.count;
+		failures.last = QDateTime::currentDateTimeUtc();
+		qWarning("[%s] wrong password from %s (%d)", qPrintable(client.clientId), qPrintable(address), failures.count);
+		sendError(client, "wrong password");
+		client.socket->disconnectFromHost();
+		return;
+	}
+	m_authFailures.remove(address);
+	welcome(client);
+}
+
+
+int CollabServer::authBlockedFor(const QString& address) const
+{
+	const auto it = m_authFailures.constFind(address);
+	if (it == m_authFailures.cend() || it->count < AuthFailuresAllowed) { return 0; }
+	const qint64 since = it->last.secsTo(QDateTime::currentDateTimeUtc());
+	return since < AuthBlockSeconds ? static_cast<int>(AuthBlockSeconds - since) : 0;
+}
+
+
+void CollabServer::welcome(Client& client)
+{
+	client.authenticated = true;
+	client.decoder.setMaxFrameSize(proto::MaxFrameSize);
+	auto ssl = qobject_cast<QSslSocket*>(client.socket);
+	send(client, {{"t", proto::msg::Welcome}, {"proto", proto::Version}, {"clientId", client.clientId},
+		{"encrypted", ssl && ssl->isEncrypted()}});
 }
 
 

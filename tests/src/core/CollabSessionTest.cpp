@@ -37,6 +37,7 @@
 #include "AutomationTrack.h"
 #include "AudioBusHandle.h"
 #include "CollabProtocol.h"
+#include "CollabConnection.h"
 #include "CollabSession.h"
 #include "ConfigManager.h"
 #include "DummyEffect.h"
@@ -1465,8 +1466,128 @@ private slots:
 		QCOMPARE(session->state(), CollabSession::State::Disconnected);
 	}
 
+	void testPassword()
+	{
+		auto session = CollabSession::instance();
+		QTemporaryDir data;
+		const quint16 port = m_port + 1;
+		QProcess server;
+		QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+		environment.insert("LMMS_COLLAB_PASSWORD", "s3cret pass");
+		server.setProcessEnvironment(environment);
+		QVERIFY(startExtraServer(server, port, data.path()));
+		QString error;
+		auto c = connect(session, &CollabSession::errorOccurred, [&](const QString& m) { error = m; });
+		auto connectWith = [&](const QByteArray& key) {
+			error.clear();
+			session->connectToServer("127.0.0.1", port, "Adri", "password-test", CollabSession::JoinMode::Create, {}, key);
+		};
+		// Without the password, or with a wrong one, there is no session
+		connectWith({});
+		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+		QVERIFY2(error.contains("password"), qPrintable(error));
+		QCOMPARE(session->state(), CollabSession::State::Disconnected);
+		connectWith(proto::passwordKey("wrong"));
+		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+		QVERIFY2(error.contains("Wrong password"), qPrintable(error));
+		// The right one: the session starts (the server has no certificate: not encrypted)
+		connectWith(proto::passwordKey("s3cret pass"));
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 5000);
+		QVERIFY(!session->isEncrypted());
+		session->leave();
+		// Repeated wrong passwords make that address wait
+		for (int i = 0; i < 5; ++i)
+		{
+			connectWith(proto::passwordKey("guess"));
+			QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+		}
+		connectWith(proto::passwordKey("s3cret pass"));
+		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+		QVERIFY2(error.contains("try again"), qPrintable(error));
+		disconnect(c);
+		server.kill();
+		server.waitForFinished(3000);
+	}
+
+	void testEncryption()
+	{
+		auto session = CollabSession::instance();
+		QTemporaryDir data;
+		const quint16 port = m_port + 2;
+		const QString dir = COLLAB_TEST_DATA;
+		QString error;
+		auto c = connect(session, &CollabSession::errorOccurred, [&](const QString& m) { error = m; });
+		auto connectNow = [&] {
+			error.clear();
+			session->connectToServer("127.0.0.1", port, "Adri", "tls-test", CollabSession::JoinMode::Open);
+		};
+		QVERIFY(collab::CollabConnection::pinnedFingerprint("127.0.0.1", port).isEmpty());
+		// An encrypted server: its certificate is remembered the first time
+		{
+			QProcess server;
+			QVERIFY(startExtraServer(server, port, data.path(), {"--tls-cert", dir + "/tls1.crt", "--tls-key", dir + "/tls1.key"}));
+			session->connectToServer("127.0.0.1", port, "Adri", "tls-test", CollabSession::JoinMode::Create);
+			QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 5000);
+			QVERIFY(session->isEncrypted());
+			QVERIFY(!session->serverFingerprint().isEmpty());
+			QCOMPARE(collab::CollabConnection::pinnedFingerprint("127.0.0.1", port), session->serverFingerprint());
+			// The session works through it (a change reaches the server and comes back acknowledged)
+			Track::create(Track::Type::Instrument, Engine::getSong())->setName("Over TLS");
+			session->flushAll();
+			QVERIFY(session->waitUntilSaved(3000));
+			session->leave();
+			server.kill();
+			server.waitForFinished(3000);
+		}
+		const QString pinned = collab::CollabConnection::pinnedFingerprint("127.0.0.1", port);
+		// The same address with another certificate: refused (someone could pretend to be the server)
+		{
+			QProcess server;
+			QVERIFY(startExtraServer(server, port, data.path(), {"--tls-cert", dir + "/tls2.crt", "--tls-key", dir + "/tls2.key"}));
+			QString changed;
+			auto c2 = connect(session, &CollabSession::serverCertificateChanged,
+				[&](const QString&, quint16, const QString& fingerprint) { changed = fingerprint; });
+			connectNow();
+			QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+			QCOMPARE(session->state(), CollabSession::State::Disconnected);
+			QVERIFY(!changed.isEmpty() && changed != pinned);
+			QCOMPARE(collab::CollabConnection::pinnedFingerprint("127.0.0.1", port), pinned);
+			disconnect(c2);
+			server.kill();
+			server.waitForFinished(3000);
+		}
+		// The same address without encryption: refused too
+		{
+			QProcess server;
+			QVERIFY(startExtraServer(server, port, data.path()));
+			connectNow();
+			QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+			QVERIFY2(error.contains("used to be encrypted"), qPrintable(error));
+			QCOMPARE(session->state(), CollabSession::State::Disconnected);
+			server.kill();
+			server.waitForFinished(3000);
+		}
+		disconnect(c);
+	}
+
 private:
 	QString m_newTrackXml;
+
+	//! Another server for one test (on its own port and data folder)
+	static bool startExtraServer(QProcess& server, quint16 port, const QString& dataDir, const QStringList& extra = {})
+	{
+		server.start(COLLAB_SERVER_EXE, QStringList{"--port", QString::number(port), "--data", dataDir} + extra);
+		if (!server.waitForStarted(5000)) { return false; }
+		for (int i = 0; i < 50; ++i)
+		{
+			QTcpSocket probe;
+			probe.connectToHost("127.0.0.1", port);
+			if (probe.waitForConnected(100)) { return true; }
+			if (server.state() == QProcess::NotRunning) { return false; }
+			QThread::msleep(100);
+		}
+		return false;
+	}
 
 	QDomDocument serverSnapshot()
 	{

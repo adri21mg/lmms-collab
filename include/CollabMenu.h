@@ -60,6 +60,11 @@ private:
 	bool isHosting() const;
 	//! Addresses of this computer others can connect to (Tailscale first)
 	static QString hostAddresses();
+	//! The key derived from a server's password, if "Remember" was chosen for it
+	static QByteArray storedPasswordKey(const QString& server);
+	static void storePasswordKey(const QString& server, const QByteArray& key);
+	//! Asks whether a server's new certificate is trusted (and remembers it if so)
+	static bool askTrustCertificate(QWidget* parent, const QString& host, quint16 port, const QString& fingerprint);
 
 	MainWindow* m_mainWindow;
 	QAction* m_connectAction;
@@ -72,6 +77,7 @@ private:
 	QTreeWidget* m_versionsList = nullptr;
 	QSet<int> m_myVersions; //!< versions this user created in this session (their Perforce errors are shown)
 	QProcess* m_hostServer = nullptr;
+	QString m_hostPassword;
 	QAction* m_statusAction;
 };
 

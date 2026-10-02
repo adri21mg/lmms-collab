@@ -1,6 +1,7 @@
 set(LMMS_SRCS
 	${LMMS_SRCS}
 	collab/CollabSession.cpp
+	collab/CollabConnection.cpp
 	collab/CollabLocalGesture.cpp
 	collab/CollabSessionAssets.cpp
 	collab/CollabSessionAutomation.cpp

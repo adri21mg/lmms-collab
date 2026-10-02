@@ -12,9 +12,13 @@ and their files, and tells each person what the others change. Pick whichever wa
 Then, so others can **reach** the server, choose [how they connect](#how-others-reach-the-server): Tailscale
 (recommended), your local network, or opening a port on your router.
 
-> **Security, please read.** For now there are no passwords and the connection is not encrypted (both are planned).
-> Anyone who can reach the server can open, change and download the projects on it. That is why we recommend
-> **Tailscale**: only the devices you invite can reach the server at all.
+> **Security, please read.** Whoever can connect to the server can open, change and download its projects, so:
+> - give it a **password** (all three ways ask for one; LMMS can remember it, and the password itself never travels);
+> - make sure the connection is **encrypted**: the Ubuntu server does it by itself; servers on Windows are not
+>   encrypted, which is fine at home or through **Tailscale** (it encrypts everything anyway), but not on an open
+>   port on the internet. The *Connect...* dialog says whether a connection is encrypted.
+>
+> We recommend **Tailscale**: only the devices you invite can reach the server at all.
 
 The server uses **TCP port 42871** unless you choose another one.
 
@@ -22,7 +26,7 @@ The server uses **TCP port 42871** unless you choose another one.
 
 ## A. Host a session from LMMS (easiest)
 
-1. *Collaboration → Connect...* → **Host a session**.
+1. *Collaboration → Connect...* → **Host a session**, and choose a password for the session (or none).
 2. The dialog shows the addresses others can use (your Tailscale address first, if you have one). Send one of them
    to your friends; they put it in *Server:* in their own *Connect...* dialog.
 3. Share your song (*Share my current song as a new project...*) or join a project that is already there.
@@ -34,8 +38,8 @@ Windows asks the first time whether `lmms-collab-server` may use the network: al
 
 ## B. A server on Windows
 
-1. Double-click `start-collab-server.bat` in the LMMS folder (next to `lmms.exe`). A black window opens: the server
-   runs while it stays open.
+1. Double-click `start-collab-server.bat` in the LMMS folder (next to `lmms.exe`). A black window opens and asks for
+   a password (press Enter for none); the server runs while the window stays open.
 2. Projects are stored in `collab-server-data` next to it. Close the window (or press Ctrl+C) to stop the server;
    it saves everything first.
 3. If Windows asks about network access, allow it on **private networks**. If you never got the question:
@@ -59,6 +63,11 @@ sudo bash collab/deploy/install-ubuntu.sh
 The script installs what is needed to build it (Qt 6, CMake, a compiler), builds only the server, and installs it
 as a service (`lmms-collab-server`) that starts with the computer and restarts if it ever crashes. It runs as its own
 user, `lmms-collab`, which can only write to `/var/lib/lmms-collab`, where the projects are kept.
+
+The first time it asks for a password everybody will need to connect, and it makes a certificate so connections are
+**encrypted** (in `/etc/lmms-collab`). LMMS remembers the server's certificate the first time it connects and warns
+if it ever changes, so nobody can pretend to be your server. Change the password later with `--password` (or remove
+it with `--no-password`).
 
 To accept connections **only through Tailscale**, give it your Tailscale address (`tailscale ip -4`):
 
@@ -106,7 +115,8 @@ Everyone on the same Wi-Fi or LAN can connect to the server's local address, lik
 
 ### Opening a port on your router (port forwarding)
 
-Only if Tailscale is not an option. Remember: **anyone on the internet** who finds the address can then join.
+Only if Tailscale is not an option. Then **anyone on the internet** can reach the server: use the Ubuntu server
+(encrypted) with a good password.
 
 1. Give the server computer a fixed local address (a "DHCP reservation" in your router).
 2. In the router: *Port forwarding* (sometimes *NAT* or *Virtual server*) → forward **TCP 42871** to that address.

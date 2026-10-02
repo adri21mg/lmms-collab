@@ -47,11 +47,14 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QCheckBox>
+#include <QSslSocket>
 #include <QHeaderView>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include "CollabPresence.h"
+#include "CollabConnection.h"
 #include "CollabSession.h"
 #include "CollabProtocol.h"
 #include "ConfigManager.h"
@@ -66,6 +69,9 @@ namespace lmms::gui
 namespace
 {
 constexpr auto ConfigSection = "collab";
+// LMMS' theme draws disabled buttons like the others: make it clear what cannot be used right now
+constexpr auto DisabledButtonStyle = "QPushButton:disabled { color: #5c6166; background: #1a1d20; "
+	"border: 1px solid #26292c; }";
 }
 
 using collab::CollabSession;
@@ -139,6 +145,14 @@ CollabMenu::CollabMenu(MainWindow* mainWindow) :
 		if (m_versionsDialog) { CollabSession::instance()->requestVersions(); }
 	});
 	connect(session, &CollabSession::versionsReceived, this, &CollabMenu::fillVersions);
+	connect(session, &CollabSession::serverCertificateChanged, this,
+		[this](const QString& host, quint16 port, const QString& fingerprint) {
+			if (askTrustCertificate(m_mainWindow, host, port, fingerprint))
+			{
+				QMessageBox::information(m_mainWindow, tr("Collaboration"),
+					tr("The new certificate is trusted now: connect again (Collaboration > Connect...)."));
+			}
+		});
 	connect(session, &CollabSession::versionRestored, this, [this](const QJsonObject& restore) {
 		const int id = restore.value("id").toInt();
 		const QString by = restore.value("by").toString();
@@ -187,7 +201,8 @@ void CollabMenu::updateState()
 	case CollabSession::State::Connecting: status = tr("Connecting..."); break;
 	case CollabSession::State::Joining: status = tr("Joining \"%1\"...").arg(session->projectName()); break;
 	case CollabSession::State::Live:
-		status = tr("Connected to \"%1\" as %2").arg(session->projectName(), session->userName());
+		status = tr("Connected to \"%1\" as %2").arg(session->projectName(), session->userName()) + " — "
+			+ (session->isEncrypted() ? tr("encrypted") : tr("not encrypted"));
 		break;
 	case CollabSession::State::Reconnecting:
 		status = tr("Connection lost: reconnecting to \"%1\"...").arg(session->projectName());
@@ -210,45 +225,70 @@ class ProjectLister : public QObject
 {
 	Q_OBJECT
 public:
-	ProjectLister(const QString& host, quint16 port, const QString& user, QObject* parent) : QObject(parent)
+	ProjectLister(const QString& host, quint16 port, const QString& user, const QByteArray& passwordKey,
+		QObject* parent) :
+		QObject(parent)
 	{
-		connect(&m_socket, &QTcpSocket::connected, this, [this, user] {
-			m_socket.write(collab::proto::encodeJsonFrame({{"t", collab::proto::msg::Hello},
-				{"proto", collab::proto::Version}, {"user", user.isEmpty() ? QString{"?"} : user}}));
-			m_socket.write(collab::proto::encodeJsonFrame({{"t", collab::proto::msg::List}}));
+		connect(&m_connection, &collab::CollabConnection::ready, this, [this] {
+			QByteArray rest;
+			m_socket = m_connection.takeSocket(rest);
+			m_decoder.append(rest);
+			connect(m_socket.get(), &QTcpSocket::readyRead, this, [this] { read(); });
+			connect(m_socket.get(), &QTcpSocket::errorOccurred, this, [this] {
+				finish({}, collab::CollabConnection::Failure::Network, m_socket->errorString());
+			});
+			m_socket->write(collab::proto::encodeJsonFrame({{"t", collab::proto::msg::List}}));
+			read();
 		});
-		connect(&m_socket, &QTcpSocket::readyRead, this, [this] {
-			m_decoder.append(m_socket.readAll());
-			collab::proto::FrameType type;
-			QByteArray payload;
-			while (m_decoder.next(type, payload))
-			{
-				const auto message = collab::proto::parseMessage(payload);
-				if (!message) { continue; }
-				const QString t = message->value("t").toString();
-				if (t == collab::proto::msg::Projects) { return finish(message->value("projects").toArray(), {}); }
-				if (t == collab::proto::msg::Error) { return finish({}, message->value("message").toString()); }
-			}
-		});
-		connect(&m_socket, &QTcpSocket::errorOccurred, this, [this] { finish({}, m_socket.errorString()); });
-		QTimer::singleShot(5000, this, [this] { finish({}, tr("The server does not answer.")); });
-		m_socket.connectToHost(host, port);
+		connect(&m_connection, &collab::CollabConnection::failed, this,
+			[this](collab::CollabConnection::Failure failure, const QString& message) { finish({}, failure, message); });
+		m_connection.open(host, port, {{"t", collab::proto::msg::Hello}, {"proto", collab::proto::Version},
+			{"user", user.isEmpty() ? QString{"?"} : user}}, passwordKey);
 	}
 
+	bool isEncrypted() const { return m_connection.isEncrypted(); }
+	QString fingerprint() const { return m_connection.fingerprint(); }
+
 signals:
-	void finished(const QJsonArray& projects, const QString& error);
+	void finished(const QJsonArray& projects, lmms::collab::CollabConnection::Failure failure, const QString& error);
 
 private:
-	void finish(const QJsonArray& projects, const QString& error)
+	void read()
+	{
+		if (m_socket) { m_decoder.append(m_socket->readAll()); }
+		collab::proto::FrameType type;
+		QByteArray payload;
+		while (m_decoder.next(type, payload))
+		{
+			const auto message = collab::proto::parseMessage(payload);
+			if (!message) { continue; }
+			const QString t = message->value("t").toString();
+			if (t == collab::proto::msg::Projects)
+			{
+				return finish(message->value("projects").toArray(), {}, {});
+			}
+			if (t == collab::proto::msg::Error)
+			{
+				return finish({}, collab::CollabConnection::Failure::Refused, message->value("message").toString());
+			}
+		}
+	}
+
+	void finish(const QJsonArray& projects, collab::CollabConnection::Failure failure, const QString& error)
 	{
 		if (m_done) { return; }
 		m_done = true;
-		m_socket.abort();
-		emit finished(projects, error);
+		if (m_socket)
+		{
+			m_socket->disconnect(this);
+			m_socket->abort();
+		}
+		emit finished(projects, failure, error);
 		deleteLater();
 	}
 
-	QTcpSocket m_socket;
+	collab::CollabConnection m_connection;
+	std::unique_ptr<QSslSocket> m_socket;
 	collab::proto::FrameDecoder m_decoder;
 	bool m_done = false;
 };
@@ -274,6 +314,11 @@ QString CollabMenu::startHosting()
 	m_hostServer->setProgram(program);
 	m_hostServer->setArguments({"--listen", "0.0.0.0", "--port", QString::number(collab::proto::DefaultPort),
 		"--data", ConfigManager::inst()->workingDir() + "collab-host"});
+	// The password goes through the environment: other users of this computer cannot see it there
+	QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+	environment.remove("LMMS_COLLAB_PASSWORD");
+	if (!m_hostPassword.isEmpty()) { environment.insert("LMMS_COLLAB_PASSWORD", m_hostPassword); }
+	m_hostServer->setProcessEnvironment(environment);
 	m_hostServer->setProcessChannelMode(QProcess::MergedChannels);
 	m_hostServer->start();
 	if (!m_hostServer->waitForStarted(3000)) { return tr("The collaboration server could not be started."); }
@@ -326,6 +371,7 @@ void CollabMenu::showConnectDialog()
 	QDialog dialog{m_mainWindow};
 	dialog.setWindowTitle(tr("Collaboration"));
 	dialog.setMinimumWidth(480);
+	dialog.setStyleSheet(DisabledButtonStyle);
 
 	// Server: the last ones used
 	auto server = new QComboBox;
@@ -343,17 +389,35 @@ void CollabMenu::showConnectDialog()
 
 	auto user = new QLineEdit{valueOr("user", QString{})};
 
+	// The server's password: remembered per server as the key derived from it, never the password itself
+	auto password = new QLineEdit;
+	password->setEchoMode(QLineEdit::Password);
+	auto rememberPassword = new QCheckBox{tr("Remember")};
+	auto updatePasswordField = [&] {
+		const bool remembered = !storedPasswordKey(server->currentText().trimmed()).isEmpty();
+		password->clear();
+		password->setPlaceholderText(remembered ? tr("(remembered)") : tr("only if the server has one"));
+		rememberPassword->setChecked(remembered);
+	};
+	auto passwordKey = [&] {
+		return password->text().isEmpty() ? storedPasswordKey(server->currentText().trimmed())
+			: collab::proto::passwordKey(password->text());
+	};
+
 	// Color of this user's cursor for the others: chosen once, otherwise derived from the name
 	QColor color{config->value(ConfigSection, "color")};
 	bool colorChosen = color.isValid();
 	auto colorButton = new QPushButton;
-	colorButton->setToolTip(tr("Color of your cursor for the other collaborators"));
+	colorButton->setToolTip(tr("Color of your cursor for the other collaborators: click to change it"));
+	colorButton->setFixedSize(56, 22);
+	colorButton->setCursor(Qt::PointingHandCursor);
+	auto colorHint = new QLabel{tr("click to change")};
+	colorHint->setEnabled(false); // shown greyed: a hint, not a setting
 	auto showColor = [&] {
 		const QColor c = colorChosen ? color : CollabPresence::defaultColor(user->text());
-		QPixmap swatch{40, 14};
-		swatch.fill(c);
-		colorButton->setIcon(QIcon{swatch});
-		colorButton->setIconSize(swatch.size());
+		colorButton->setStyleSheet(QString{"QPushButton { background-color: %1; border: 1px solid %2; border-radius: 5px; }"
+			"QPushButton:hover { border: 2px solid %3; }"}
+			.arg(c.name(), c.darker(160).name(), colorButton->palette().color(QPalette::Highlight).name()));
 	};
 	connect(user, &QLineEdit::textChanged, &dialog, [&] { showColor(); });
 	connect(colorButton, &QPushButton::clicked, &dialog, [&] {
@@ -372,10 +436,24 @@ void CollabMenu::showConnectDialog()
 	auto refresh = new QPushButton{tr("Refresh")};
 	auto listInfo = new QLabel;
 	listInfo->setWordWrap(true);
+	auto security = new QLabel;
+	security->setWordWrap(true);
 	auto openButton = new QPushButton{tr("Join selected project")};
 	openButton->setToolTip(tr("Replaces your current song with the shared project"));
 	openButton->setEnabled(false);
 	auto createButton = new QPushButton{tr("Share my current song as a new project...")};
+	auto connectButton = new QPushButton{tr("Connect")};
+	connectButton->setToolTip(tr("Connects to the server and shows its projects"));
+	connectButton->setDefault(true);
+	enum class ListState { NotConnected, Asking, Connected };
+	ListState listState = ListState::NotConnected;
+	auto updateButtons = [&] {
+		const bool connected = listState == ListState::Connected;
+		connectButton->setEnabled(listState != ListState::Asking && !server->currentText().trimmed().isEmpty());
+		refresh->setEnabled(connected);
+		createButton->setEnabled(connected);
+		openButton->setEnabled(connected && projects->currentItem() != nullptr);
+	};
 
 	auto hostAndPort = [&](QString& host, quint16& port) {
 		const QString address = server->currentText().trimmed();
@@ -389,22 +467,69 @@ void CollabMenu::showConnectDialog()
 	};
 	auto loadProjects = [&] {
 		projects->clear();
-		openButton->setEnabled(false);
+		listState = ListState::NotConnected;
+		security->clear();
 		QString host;
 		quint16 port = 0;
 		if (!hostAndPort(host, port))
 		{
 			listInfo->setText(tr("Use the form host:port for the server."));
+			updateButtons();
 			return;
 		}
 		listInfo->setText(tr("Asking the server..."));
-		auto lister = new ProjectLister(host, port, user->text().trimmed(), &dialog);
-		connect(lister, &ProjectLister::finished, &dialog, [&](const QJsonArray& list, const QString& error) {
+		listState = ListState::Asking;
+		updateButtons();
+		auto lister = new ProjectLister(host, port, user->text().trimmed(), passwordKey(), &dialog);
+		connect(lister, &ProjectLister::finished, &dialog, [&, lister, host, port](const QJsonArray& list,
+			collab::CollabConnection::Failure failure, const QString& error) {
+			listState = error.isEmpty() ? ListState::Connected : ListState::NotConnected;
+			updateButtons();
 			if (!error.isEmpty())
 			{
-				listInfo->setText(tr("Cannot reach the server: %1").arg(error));
+				using Failure = collab::CollabConnection::Failure;
+				switch (failure)
+				{
+				case Failure::PasswordNeeded:
+					listInfo->setText(tr("This server needs a password: type it above and click Connect."));
+					password->setFocus();
+					break;
+				case Failure::WrongPassword:
+					if (password->text().isEmpty() && !storedPasswordKey(server->currentText().trimmed()).isEmpty())
+					{
+						// The remembered one no longer works (e.g. it changed on the server): forgotten
+						storePasswordKey(server->currentText().trimmed(), {});
+						updatePasswordField();
+						listInfo->setText(tr("The remembered password is no longer right: type it again."));
+					}
+					else
+					{
+						listInfo->setText(tr("Wrong password (after several wrong ones, wait a minute before trying again)."));
+					}
+					password->setFocus();
+					break;
+				case Failure::CertificateChanged:
+					listInfo->setText(error);
+					if (askTrustCertificate(&dialog, host, port, lister->fingerprint()))
+					{
+						QTimer::singleShot(0, connectButton, &QPushButton::click);
+					}
+					break;
+				case Failure::Network: listInfo->setText(tr("Cannot reach the server: %1").arg(error)); break;
+				default: listInfo->setText(error); break;
+				}
 				return;
 			}
+			// The server took the password: remembered now if asked (not only when joining a project)
+			if (!password->text().isEmpty())
+			{
+				storePasswordKey(server->currentText().trimmed(),
+					rememberPassword->isChecked() ? collab::proto::passwordKey(password->text()) : QByteArray{});
+			}
+			security->setText(lister->isEncrypted()
+				? QString{QChar{0x2713}} + " " + tr("Encrypted connection")
+				: tr("Not encrypted: fine through Tailscale or at home; over the internet, use a server with "
+					"encryption (see the guide)."));
 			const QString dash = QString{"  "} + QChar{0x2014} + "  ";
 			for (const QJsonValue& value : list)
 			{
@@ -423,22 +548,43 @@ void CollabMenu::showConnectDialog()
 	};
 	connect(refresh, &QPushButton::clicked, &dialog, loadProjects);
 	connect(server, &QComboBox::activated, &dialog, loadProjects);
-	connect(projects, &QListWidget::currentItemChanged, &dialog, [&] { openButton->setEnabled(projects->currentItem() != nullptr); });
+	connect(server, &QComboBox::currentTextChanged, &dialog, [&] {
+		// Another server: nothing is known about it until Connect
+		updatePasswordField();
+		projects->clear();
+		security->clear();
+		listInfo->setText(tr("Click Connect to see the projects of this server."));
+		listState = ListState::NotConnected;
+		updateButtons();
+	});
+	connect(connectButton, &QPushButton::clicked, &dialog, loadProjects);
+	updatePasswordField();
+	connect(projects, &QListWidget::currentItemChanged, &dialog, [&] { updateButtons(); });
+	updateButtons();
 
 	auto showHosting = [&] {
 		const QString addresses = hostAddresses();
-		hostInfo->setText(tr("You are hosting a session. Others connect to:\n%1\n\nAnyone who can reach this computer on "
-			"that port can join (passwords will come later): Tailscale is the safe way to play with friends over the "
-			"internet.").arg(addresses.isEmpty() ? tr("(no network address found)") : addresses));
+		hostInfo->setText(tr("You are hosting a session. Others connect to:\n%1\n\n%2 The connection is not "
+			"encrypted: Tailscale is the safe way to play with friends over the internet.")
+			.arg(addresses.isEmpty() ? tr("(no network address found)") : addresses)
+			.arg(m_hostPassword.isEmpty() ? tr("Anyone who can reach this computer on that port can join.")
+				: tr("They need the password you chose.")));
 		hostButton->setEnabled(false);
 	};
 	connect(hostButton, &QPushButton::clicked, &dialog, [&] {
+		bool ok = false;
+		const QString chosen = QInputDialog::getText(&dialog, tr("Host a session"),
+			tr("A password for your session (others will need it to join).\nLeave it empty for none:"),
+			QLineEdit::Password, QString{}, &ok);
+		if (!ok) { return; }
+		m_hostPassword = chosen;
 		if (const QString error = startHosting(); !error.isEmpty())
 		{
 			QMessageBox::warning(&dialog, dialog.windowTitle(), error);
 			return;
 		}
 		server->setEditText(QString{"127.0.0.1:%1"}.arg(collab::proto::DefaultPort));
+		password->setText(m_hostPassword);
 		showHosting();
 		loadProjects();
 	});
@@ -450,8 +596,17 @@ void CollabMenu::showConnectDialog()
 	serverRow->addWidget(hostButton);
 	form->addRow(tr("Server:"), serverRow);
 	form->addRow(QString{}, hostInfo);
+	auto passwordRow = new QHBoxLayout;
+	passwordRow->addWidget(password, 1);
+	passwordRow->addWidget(rememberPassword);
+	passwordRow->addWidget(connectButton);
+	form->addRow(tr("Password:"), passwordRow);
 	form->addRow(tr("Your name:"), user);
-	form->addRow(tr("Your color:"), colorButton);
+	auto colorRow = new QHBoxLayout;
+	colorRow->addWidget(colorButton);
+	colorRow->addWidget(colorHint);
+	colorRow->addStretch(1);
+	form->addRow(tr("Your color:"), colorRow);
 	auto listHeader = new QHBoxLayout;
 	listHeader->addWidget(new QLabel{tr("Projects on this server:")}, 1);
 	listHeader->addWidget(refresh);
@@ -466,6 +621,7 @@ void CollabMenu::showConnectDialog()
 	layout->addLayout(listHeader);
 	layout->addWidget(projects);
 	layout->addWidget(listInfo);
+	layout->addWidget(security);
 	layout->addLayout(actions);
 
 	// The choice: join a project, or share the current song as a new one
@@ -510,13 +666,53 @@ void CollabMenu::showConnectDialog()
 	config->setValue(ConfigSection, "user", user->text().trimmed());
 	config->setValue(ConfigSection, "project", chosenProject);
 	if (colorChosen) { config->setValue(ConfigSection, "color", color.name()); }
+	const QByteArray key = passwordKey();
+	storePasswordKey(address, rememberPassword->isChecked() ? key : QByteArray{});
 	const QColor userColor = colorChosen ? color : CollabPresence::defaultColor(user->text());
 
 	// Opening a shared project replaces the current song, so offer to save it first
 	if (!create && !m_mainWindow->mayChangeProject(true)) { return; }
 
 	CollabSession::instance()->connectToServer(host, port, user->text().trimmed(), chosenProject,
-		create ? CollabSession::JoinMode::Create : CollabSession::JoinMode::Open, userColor.name());
+		create ? CollabSession::JoinMode::Create : CollabSession::JoinMode::Open, userColor.name(), key);
+}
+
+
+QByteArray CollabMenu::storedPasswordKey(const QString& server)
+{
+	for (const QString& entry : ConfigManager::inst()->value(ConfigSection, "passwords").split(';', Qt::SkipEmptyParts))
+	{
+		if (entry.section('=', 0, 0) == server.toLower()) { return QByteArray::fromHex(entry.section('=', 1).toLatin1()); }
+	}
+	return {};
+}
+
+
+void CollabMenu::storePasswordKey(const QString& server, const QByteArray& key)
+{
+	QStringList entries;
+	for (const QString& entry : ConfigManager::inst()->value(ConfigSection, "passwords").split(';', Qt::SkipEmptyParts))
+	{
+		if (entry.section('=', 0, 0) != server.toLower()) { entries.append(entry); }
+	}
+	if (!key.isEmpty()) { entries.append(server.toLower() + "=" + QString::fromLatin1(key.toHex())); }
+	ConfigManager::inst()->setValue(ConfigSection, "passwords", entries.join(';'));
+}
+
+
+bool CollabMenu::askTrustCertificate(QWidget* parent, const QString& host, quint16 port, const QString& fingerprint)
+{
+	QMessageBox box{QMessageBox::Warning, tr("The server's certificate changed"),
+		tr("The certificate of %1:%2 is not the one it had before.\n\nIf the owner of the server made a new one "
+			"(e.g. reinstalled it), you can trust it. If not, someone could be pretending to be the server: do not "
+			"connect.\n\nNew certificate (SHA-256):\n%3").arg(host).arg(port).arg(fingerprint),
+		QMessageBox::Cancel, parent};
+	QPushButton* trust = box.addButton(tr("Trust the new certificate"), QMessageBox::AcceptRole);
+	box.setDefaultButton(QMessageBox::Cancel);
+	box.exec();
+	if (box.clickedButton() != trust || fingerprint.isEmpty()) { return false; }
+	collab::CollabConnection::pin(host, port, fingerprint);
+	return true;
 }
 
 
@@ -551,6 +747,7 @@ void CollabMenu::showVersions()
 	auto dialog = new QDialog{m_mainWindow};
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
 	dialog->setWindowTitle(tr("Versions of \"%1\"").arg(session->projectName()));
+	dialog->setStyleSheet(DisabledButtonStyle);
 	dialog->resize(760, 380);
 	auto layout = new QVBoxLayout{dialog};
 	m_versionsList = new QTreeWidget{dialog};

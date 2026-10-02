@@ -43,6 +43,7 @@
 #include <QSet>
 
 #include "AutomatableModel.h"
+#include "CollabConnection.h"
 #include "CollabId.h"
 #include "CollabProtocol.h"
 #include "ProjectJournal.h"
@@ -129,8 +130,13 @@ public:
 
 	static CollabSession* instance();
 
+	//! @p passwordKey: proto::passwordKey of the server's password, if it has one
 	void connectToServer(const QString& host, quint16 port, const QString& user, const QString& project,
-		JoinMode mode, const QString& color = {});
+		JoinMode mode, const QString& color = {}, const QByteArray& passwordKey = {});
+	//! The connection to the server is encrypted (TLS)
+	bool isEncrypted() const { return m_encrypted; }
+	//! SHA-256 of the server's certificate when encrypted
+	QString serverFingerprint() const { return m_fingerprint; }
 
 	//! Where this user is: {cursor, play, view}, see proto::sanitizePresence; ignored unless connected
 	void sendPresence(const QJsonObject& presence);
@@ -182,6 +188,8 @@ signals:
 	//! The server's Perforce submit of a version ended: p4 = {state, change?, error?}
 	void versionPerforce(int id, const QJsonObject& p4);
 	void versionsReceived(const QJsonArray& versions);
+	//! The server's certificate is not the one remembered for it (the connection was refused)
+	void serverCertificateChanged(const QString& host, quint16 port, const QString& fingerprint);
 	//! A version request could not be done (the session goes on)
 	void versionError(const QString& message);
 	//! Someone restored a version: {id, by, description, safety} (the project is being loaded again)
@@ -286,6 +294,8 @@ private:
 	void onReadyRead();
 	void handleMessage(const QJsonObject& message);
 	void handleJoined(const QJsonObject& message);
+	//! The server welcomed us (encryption and password done): the session starts
+	void onConnected(const QJsonObject& welcome);
 	//! The connection was lost in a session: try again until the user leaves
 	void startReconnecting();
 	//! Back after a lost connection: what this user changed meanwhile is offered as a file of its own (D5)
@@ -477,6 +487,10 @@ private:
 	static Track* findTrack(collab_id_t trackId);
 
 	std::unique_ptr<QTcpSocket> m_socket;
+	std::unique_ptr<CollabConnection> m_connection; //!< until the server welcomed us
+	QByteArray m_passwordKey;
+	bool m_encrypted = false;
+	QString m_fingerprint;
 	proto::FrameDecoder m_decoder;
 	State m_state = State::Disconnected;
 	JoinMode m_joinMode = JoinMode::Open;

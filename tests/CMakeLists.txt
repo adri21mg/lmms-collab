@@ -39,3 +39,4 @@ endforeach()
 # The collaboration end-to-end test starts the real server
 add_dependencies(CollabSessionTest lmms-collab-server)
 target_compile_definitions(CollabSessionTest PRIVATE COLLAB_SERVER_EXE="$<TARGET_FILE:lmms-collab-server>")
+target_compile_definitions(CollabSessionTest PRIVATE COLLAB_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data/collab")
