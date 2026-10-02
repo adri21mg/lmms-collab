@@ -1970,7 +1970,12 @@ bool CollabSession::restore(JournallingObject* jo, std::uint64_t token, bool und
 		{
 			it = it.value() == token ? m_openParamGesture.erase(it) : std::next(it);
 		}
-		if (g->second.removedTrack) { replayRemoval(*g->second.removedTrack, undo); }
+		if (g->second.removedTrack)
+		{
+			log(QString{"%1 of removing track %2"}.arg(undo ? "undo" : "redo")
+				.arg(proto::idString(g->second.removedTrack->id)));
+			replayRemoval(*g->second.removedTrack, undo);
+		}
 		else { replayGesture(g->second, undo); }
 	}
 	return true;
@@ -1995,7 +2000,13 @@ public:
 
 void CollabSession::trackAboutToBeRemoved(Track* track)
 {
-	if (m_state != State::Live || m_applyingRemote || m_replayingRemoval || !isShared(track)) { return; }
+	if (m_state != State::Live || m_applyingRemote || m_replayingRemoval || !isShared(track))
+	{
+		log(QString{"track %1 removed: not kept for undo (state %2, remote %3, replaying %4, shared %5)"}
+			.arg(proto::idString(track->collabId())).arg(static_cast<int>(m_state)).arg(m_applyingRemote)
+			.arg(m_replayingRemoval).arg(isShared(track)));
+		return;
+	}
 	TrackContainer* container = track->trackContainer();
 	RemovedTrack removed;
 	removed.id = track->collabId();
@@ -2014,7 +2025,10 @@ void CollabSession::trackAboutToBeRemoved(Track* track)
 	}
 	if (!m_undoAnchor) { m_undoAnchor = std::make_unique<UndoAnchor>(); }
 	m_pendingRemoval = std::move(removed);
+	const bool journalling = Engine::projectJournal()->isJournalling();
 	Engine::projectJournal()->addJournalCheckPoint(m_undoAnchor.get());
+	log(QString{"track %1 removed: kept for undo (journalling %2, recorded %3)"}.arg(proto::idString(track->collabId()))
+		.arg(journalling).arg(!m_pendingRemoval.has_value()));
 	m_pendingRemoval.reset();
 }
 

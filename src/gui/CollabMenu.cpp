@@ -24,6 +24,8 @@
 
 #include "CollabMenu.h"
 
+#include <memory>
+
 #include <QColorDialog>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -60,6 +62,10 @@
 #include "ConfigManager.h"
 #include "lmmsconfig.h"
 #include "MainWindow.h"
+#include "GuiApplication.h"
+#include "Track.h"
+#include "TrackView.h"
+#include "SongEditor.h"
 #include "TextFloat.h"
 #include "embed.h"
 
@@ -198,6 +204,25 @@ CollabMenu::CollabMenu(MainWindow* mainWindow) :
 
 	// For testing with a real window: LMMS_COLLAB_AUTOCONNECT="host:port|user|project|create" joins at start
 	// (create = 1 shares the current song as that project)
+	// Testing too: LMMS_COLLAB_SELFTEST_REMOVE="track name" removes that track as the editor does once in the
+	// session, then undoes it (as Ctrl+Z would) and redoes it
+	if (const QString name = qEnvironmentVariable("LMMS_COLLAB_SELFTEST_REMOVE"); !name.isEmpty())
+	{
+		auto started = std::make_shared<bool>(false);
+		connect(session, &CollabSession::stateChanged, this, [this, name, started] {
+			if (*started || CollabSession::instance()->state() != CollabSession::State::Live) { return; }
+			*started = true;
+			QTimer::singleShot(3000, this, [this, name] {
+				auto editor = getGUI()->songEditor()->m_editor;
+				for (TrackView* view : editor->trackViews())
+				{
+					if (view->getTrack()->name() == name) { editor->deleteTrackView(view); break; }
+				}
+				QTimer::singleShot(2500, m_mainWindow, &MainWindow::undo);
+				QTimer::singleShot(6000, m_mainWindow, &MainWindow::redo);
+			});
+		});
+	}
 	const QStringList autoConnect = qEnvironmentVariable("LMMS_COLLAB_AUTOCONNECT").split('|');
 	if (autoConnect.size() == 4)
 	{

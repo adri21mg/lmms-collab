@@ -148,8 +148,13 @@ bool TrackOperationsWidget::confirmRemoval()
 	bool needConfirm = ConfigManager::inst()->value("ui", "trackdeletionwarning", "1").toInt();
 	if (!needConfirm){ return true; }
 	
-	QString messageRemoveTrack = tr("After removing a track, it can not "
-					"be recovered. Are you sure you want to remove track \"%1\"?")
+	// In a collaboration session removing a track can be undone (Ctrl+Z, by whoever removed it)
+	const bool session = collab::CollabSession::instance()->state() == collab::CollabSession::State::Live;
+	QString messageRemoveTrack = (session
+		? tr("Removing track \"%1\" removes it for everyone in the session. You can undo it (Ctrl+Z). "
+			"Are you sure you want to remove it?")
+		: tr("After removing a track, it can not "
+					"be recovered. Are you sure you want to remove track \"%1\"?"))
 					.arg(m_trackView->getTrack()->name());
 	QString messageTitleRemoveTrack = tr("Confirm removal");
 	QString askAgainText = tr("Don't ask again");
