@@ -22,7 +22,7 @@
 	<p><a href="https://ko-fi.com/systmstudio"><img src="collab/assets/kofi-button.gif" width="210" alt="Support me on Ko-fi"></a></p>
 </div>
 
-<!-- GIFs: collab/assets/ -->
+<p align="center"><img src="collab/assets/demo-song.gif" alt="Two people editing the same song at the same time" width="100%"></p>
 
 ## What it adds
 
@@ -34,6 +34,8 @@
   (optionally also into Perforce).
 - **Safe to use.** A password for your server, encrypted connections, it reconnects by itself, and a plugin someone
   does not have never loses its settings.
+
+<p align="center"><img src="collab/assets/demo-instrument.gif" alt="Turning the knobs of the same instrument together" width="100%"></p>
 
 Everything else is LMMS as you know it.
 
