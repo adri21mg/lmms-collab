@@ -365,7 +365,11 @@ QString CollabMenu::hostAddresses()
 		const quint32 ip = address.toIPv4Address();
 		const QString text = QString{"%1:%2"}.arg(address.toString()).arg(collab::proto::DefaultPort);
 		if ((ip & 0xffc00000u) == 0x64400000u) { tailscale.append(text + " (Tailscale)"); }
-		else if (address.isPrivateUse()) { local.append(text + tr(" (local network)")); }
+		// Private IPv4 ranges: 10/8, 172.16/12, 192.168/16 (QHostAddress::isPrivateUse() needs Qt 6.6)
+		else if ((ip & 0xff000000u) == 0x0a000000u || (ip & 0xfff00000u) == 0xac100000u || (ip & 0xffff0000u) == 0xc0a80000u)
+		{
+			local.append(text + tr(" (local network)"));
+		}
 	}
 	return (tailscale + local).join("\n");
 }
