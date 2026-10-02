@@ -23,6 +23,7 @@
  */
 
 #include "CollabSession.h"
+#include "Plugin.h"
 #include "CollabLocalGesture.h"
 #include "CollabSessionUtil.h"
 
@@ -182,6 +183,28 @@ CollabSession::CollabSession() :
 		flushParams();
 	});
 	connect(m_trackStateTimer, &QTimer::timeout, this, &CollabSession::sendTrackStates);
+
+	// Plugins that are not installed here: in a session one notice lists them all (instead of a message box
+	// per plugin, possibly in the middle of applying someone else's change); their settings are kept
+	Plugin::setMissingPluginHandler([this](const QString& name, const QString& reason) {
+		if (m_state == State::Disconnected && !m_reconnecting) { return false; }
+		notePluginMissing(name, reason);
+		return true;
+	});
+}
+
+
+void CollabSession::notePluginMissing(const QString& name, const QString& reason)
+{
+	if (m_missingPlugins.contains(name)) { return; }
+	log(QString{"plugin %1 is not available here: %2"}.arg(name, reason));
+	m_missingPlugins.insert(name);
+	m_newMissingPlugins.append(name);
+	if (m_newMissingPlugins.size() == 1)
+	{
+		// Together with the others that come in the same moment (e.g. loading the project)
+		QTimer::singleShot(300, this, [this] { emit missingPlugins(std::exchange(m_newMissingPlugins, {})); });
+	}
 }
 
 
@@ -213,6 +236,7 @@ void CollabSession::connectToServer(const QString& host, quint16 port, const QSt
 		if (!m_log->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) { m_log.reset(); }
 	}
 	log(QString{"connect %1:%2 as %3, project %4"}.arg(host).arg(port).arg(user, project));
+	if (!m_reconnecting) { m_missingPlugins.clear(); } // told again in another session
 	m_project = project;
 	m_joinMode = mode;
 	m_host = host;
@@ -280,7 +304,7 @@ void CollabSession::onConnected(const QJsonObject& welcome)
 }
 
 
-void CollabSession::disconnectFromServer()
+void CollabSession::forgetProjectState()
 {
 	stopTracking();
 	m_baselines.clear();
@@ -300,6 +324,17 @@ void CollabSession::disconnectFromServer()
 	m_opaqueCheck.invalidate();
 	m_txQueue.clear();
 	m_txQueueTimer->stop();
+	m_unresolvedAutomation.clear();
+	m_linkBaseline.clear();
+	m_pendingLinks.clear();
+	m_unresolvedLinks.clear();
+	m_forcePluginCheck.clear();
+}
+
+
+void CollabSession::disconnectFromServer()
+{
+	forgetProjectState();
 	m_decoder = proto::FrameDecoder{};
 	// Shared files on their way
 	m_downloadQueue.clear();
@@ -308,11 +343,6 @@ void CollabSession::disconnectFromServer()
 	m_pendingJoin.reset();
 	m_uploads.clear();
 	m_shareQueue.clear();
-	m_unresolvedAutomation.clear();
-	m_linkBaseline.clear();
-	m_pendingLinks.clear();
-	m_unresolvedLinks.clear();
-	m_forcePluginCheck.clear();
 	if (m_downloadProgress) { m_downloadProgress->close(); }
 	emit presenceCleared();
 	refreshSharedFiles(); // back to LMMS' own files
@@ -572,6 +602,13 @@ void CollabSession::requestVersions()
 }
 
 
+void CollabSession::setColor(const QString& color)
+{
+	m_color = color;
+	if (m_state == State::Live) { send({{"t", proto::msg::Color}, {"color", color}}); }
+}
+
+
 void CollabSession::restoreVersion(int id)
 {
 	if (m_state != State::Live) { return; }
@@ -584,9 +621,9 @@ void CollabSession::reloadRestored(const QJsonObject& message)
 {
 	log(QString{"version %1 restored by %2 (the state before is version %3): reloading"}
 		.arg(message.value("id").toInt()).arg(message.value("by").toString()).arg(message.value("safety").toInt()));
-	// What is still waiting was made on the project before the restore; it is gone with it
-	m_txQueue.clear();
-	stopTracking();
+	// Everything known about the project before the restore goes (what is still waiting was made on it, and its
+	// baselines would make the restored state look like local changes, echoed to everyone)
+	forgetProjectState();
 	setState(State::Joining);
 	emit versionRestored(message);
 	// Like joining: the same project, as the server has it now

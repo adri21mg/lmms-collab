@@ -137,7 +137,7 @@ QString instrumentXml(InstrumentTrack* track)
 	QDomDocument doc;
 	QDomElement element = doc.createElement("instrument");
 	doc.appendChild(element);
-	element.setAttribute("name", instrument->descriptor()->name);
+	element.setAttribute("name", instrument->pluginName());
 	QDomElement state = instrument->saveState(doc, element);
 	if (instrument->key().isValid()) { state.appendChild(instrument->key().saveXML(doc)); }
 	return elementText(element);
@@ -801,7 +801,7 @@ void CollabSession::applyRemoteInstrument(const QJsonObject& op)
 	const QString currentXml = instrumentXml(track);
 	QDomDocument current;
 	current.setContent(currentXml);
-	const bool samePlugin = track->instrument() && track->instrument()->descriptor()->name == name
+	const bool samePlugin = track->instrument() && track->instrument()->pluginName() == name
 		&& keyText(current.documentElement()) == keyText(element);
 	if (samePlugin && currentXml == op.value("xml").toString())
 	{
@@ -898,7 +898,7 @@ void CollabSession::applyRemoteEffects(const QJsonObject& op)
 				// without LMMS's "Plugin not found" message box on every change
 				EffectKey key(element.elementsByTagName("key").item(0).toElement());
 				const bool available = !getPluginFactory()->pluginInfo(element.attribute("name").toUtf8()).isNull();
-				if (!available) { log(QString{"effect %1 is not available here"}.arg(element.attribute("name"))); }
+				if (!available) { notePluginMissing(element.attribute("name"), "not installed"); }
 				effect = available ? Effect::instantiate(element.attribute("name"), chain, &key) : nullptr;
 				if (effect && effect->isOkay() && effect->nodeName() == element.nodeName()) { effect->restoreState(element); }
 				else

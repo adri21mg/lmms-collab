@@ -103,6 +103,15 @@ TrackOperationsWidget::TrackOperationsWidget(TrackView* parent)
 
 	layout->addWidget(operationsWidget, 0, Qt::AlignTop | Qt::AlignLeading);
 
+	// In a collaboration session Solo is private (only this user hears it): said under the button
+	auto updateSolo = [this] {
+		const bool session = collab::CollabSession::instance()->state() == collab::CollabSession::State::Live;
+		m_soloBtn->setToolTip(session ? tr("Solo: only for you (the others do not hear it)") : tr("Solo"));
+		update();
+	};
+	connect(collab::CollabSession::instance(), &collab::CollabSession::stateChanged, this, updateSolo);
+	updateSolo();
+
 	connect( this, SIGNAL(trackRemovalScheduled(lmms::gui::TrackView*)),
 			m_trackView->trackContainerView(),
 				SLOT(deleteTrackView(lmms::gui::TrackView*)),
@@ -120,6 +129,17 @@ void TrackOperationsWidget::paintEvent(QPaintEvent*)
 	QPainter p( this );
 
 	p.fillRect(rect(), palette().brush(QPalette::Window));
+
+	if (collab::CollabSession::instance()->state() == collab::CollabSession::State::Live && m_soloBtn->isVisible())
+	{
+		QFont font = p.font();
+		font.setPixelSize(8);
+		p.setFont(font);
+		p.setPen(palette().color(QPalette::Disabled, QPalette::WindowText));
+		const QRect button{m_soloBtn->mapTo(this, QPoint{0, 0}), m_soloBtn->size()};
+		const QRect below{button.center().x() - 15, button.bottom() + 1, 30, 9};
+		p.drawText(below, Qt::AlignHCenter | Qt::AlignTop, tr("local"));
+	}
 }
 
 

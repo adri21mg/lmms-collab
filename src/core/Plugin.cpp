@@ -197,6 +197,18 @@ Plugin * Plugin::instantiateWithKey(const QString& pluginName, Model * parent,
 
 
 
+namespace
+{
+Plugin::MissingPluginHandler s_missingPluginHandler;
+}
+
+
+void Plugin::setMissingPluginHandler(MissingPluginHandler handler)
+{
+	s_missingPluginHandler = std::move(handler);
+}
+
+
 Plugin * Plugin::instantiate(const QString& pluginName, Model * parent,
 								void *data)
 {
@@ -205,7 +217,11 @@ Plugin * Plugin::instantiate(const QString& pluginName, Model * parent,
 	Plugin* inst;
 	if( pi.isNull() )
 	{
-		if (gui::getGUI() != nullptr)
+		if (s_missingPluginHandler && s_missingPluginHandler(pluginName, getPluginFactory()->errorString(pluginName)))
+		{
+			// told elsewhere
+		}
+		else if (gui::getGUI() != nullptr)
 		{
 			QMessageBox::information( nullptr,
 				tr( "Plugin not found" ),

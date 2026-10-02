@@ -842,7 +842,7 @@ void InstrumentTrack::saveTrackSpecificSettings(QDomDocument& doc, QDomElement& 
 	if( m_instrument != nullptr )
 	{
 		QDomElement i = doc.createElement( "instrument" );
-		i.setAttribute( "name", m_instrument->descriptor()->name );
+		i.setAttribute( "name", m_instrument->pluginName() );
 		QDomElement ins = m_instrument->saveState( doc, i );
 		if(m_instrument->key().isValid()) {
 			ins.appendChild( m_instrument->key().saveXML( doc ) );

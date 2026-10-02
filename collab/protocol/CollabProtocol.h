@@ -153,6 +153,8 @@ inline constexpr auto Welcome = "welcome";
  * travels. Right: welcome. Wrong: error, and the connection is closed (repeated failures make a client wait).
  */
 inline constexpr auto Auth = "auth";
+//! color {color: "#rrggbb"}: this user's color from now on (the others see it in the next presence)
+inline constexpr auto Color = "color";
 inline constexpr auto Create = "create";
 inline constexpr auto Open = "open";
 inline constexpr auto Joined = "joined";

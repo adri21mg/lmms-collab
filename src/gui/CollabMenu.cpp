@@ -145,6 +145,17 @@ CollabMenu::CollabMenu(MainWindow* mainWindow) :
 		if (m_versionsDialog) { CollabSession::instance()->requestVersions(); }
 	});
 	connect(session, &CollabSession::versionsReceived, this, &CollabMenu::fillVersions);
+	connect(session, &CollabSession::missingPlugins, this, [this](const QStringList& names) {
+		auto box = new QMessageBox{QMessageBox::Information, tr("Plugins not installed"),
+			tr("This project uses plugins that are not installed on this computer:") + "\n\n    "
+				+ names.join("\n    ") + "\n\n"
+				+ tr("Their tracks and effects are silent for you, but their settings are kept: they keep working "
+					"for the collaborators who have them. Install them to hear everything."),
+			QMessageBox::Ok, m_mainWindow};
+		box->setAttribute(Qt::WA_DeleteOnClose);
+		box->setModal(false);
+		box->show();
+	});
 	connect(session, &CollabSession::serverCertificateChanged, this,
 		[this](const QString& host, quint16 port, const QString& fingerprint) {
 			if (askTrustCertificate(m_mainWindow, host, port, fingerprint))

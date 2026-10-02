@@ -40,6 +40,9 @@
 #include <set>
 
 #include <QApplication>
+#include <QPushButton>
+#include <QMessageBox>
+#include <QColorDialog>
 #include <QCursor>
 #include <QElapsedTimer>
 #include <QHBoxLayout>
@@ -557,6 +560,7 @@ CollabPresence::CollabPresence(MainWindow* mainWindow) :
 	connect(session, &CollabSession::presenceReceived, this, &CollabPresence::onPresence);
 	connect(session, &CollabSession::presenceCleared, this, [this] {
 		m_users.clear();
+		m_colorChecked.clear();
 		updateOverlays();
 		emit usersChanged();
 	});
@@ -840,9 +844,88 @@ void CollabPresence::onPresence(const QJsonObject& presence)
 		user.play = presence.value("play").toObject();
 		user.view = presence.value("view").toObject();
 		if (!user.cursor.isEmpty()) { user.lastWindow = user.cursor.value("w").toString(); }
+		checkColor(id, user);
 	}
 	updateOverlays();
 	emit usersChanged();
+}
+
+
+namespace
+{
+
+//! How different two colors look ("redmean" weighting of RGB: close to perception, 0..765)
+double colorDistance(const QColor& a, const QColor& b)
+{
+	const double mean = (a.red() + b.red()) / 2.0;
+	const double r = a.red() - b.red();
+	const double g = a.green() - b.green();
+	const double bl = a.blue() - b.blue();
+	return std::sqrt((2 + mean / 256) * r * r + 4 * g * g + (2 + (255 - mean) / 256) * bl * bl);
+}
+
+constexpr double SimilarColorDistance = 110;
+
+int clientNumber(const QString& clientId) { return clientId.mid(1).toInt(); }
+
+} // namespace
+
+
+void CollabPresence::checkColor(const QString& clientId, const User& user)
+{
+	if (m_colorChecked.contains(clientId)) { return; }
+	auto session = collab::CollabSession::instance();
+	const QColor mine{session->userColor()};
+	if (!mine.isValid() || !user.color.isValid()) { return; }
+	m_colorChecked.insert(clientId);
+	if (colorDistance(mine, user.color) > SimilarColorDistance) { return; }
+	// Both computers decide the same way: only the one who connected later is asked
+	if (clientNumber(session->clientId()) < clientNumber(clientId)) { return; }
+	QTimer::singleShot(0, this, [this, name = user.name] { askOtherColor(name); });
+}
+
+
+void CollabPresence::askOtherColor(const QString& name)
+{
+	// The color that differs most from everybody's
+	QColor suggestion;
+	double best = -1;
+	for (int hue = 0; hue < 360; hue += 20)
+	{
+		const QColor candidate = QColor::fromHsv(hue, 200, 235);
+		double nearest = 1e9;
+		for (const auto& [id, user] : m_users) { nearest = std::min(nearest, colorDistance(candidate, user.color)); }
+		if (nearest > best)
+		{
+			best = nearest;
+			suggestion = candidate;
+		}
+	}
+	auto box = new QMessageBox{QMessageBox::Question, tr("Similar colors"),
+		tr("Your color is very similar to %1's: it will be hard to tell your cursors apart.").arg(name) + "\n\n"
+			+ tr("Use another color?"),
+		QMessageBox::NoButton, getGUI()->mainWindow()};
+	QPixmap swatch{16, 16};
+	swatch.fill(suggestion);
+	QPushButton* use = box->addButton(tr("Use this one"), QMessageBox::AcceptRole);
+	use->setIcon(QIcon{swatch});
+	QPushButton* choose = box->addButton(tr("Choose..."), QMessageBox::ActionRole);
+	box->addButton(tr("Keep mine"), QMessageBox::RejectRole);
+	box->setAttribute(Qt::WA_DeleteOnClose);
+	box->setModal(false);
+	connect(box, &QMessageBox::buttonClicked, this, [=, this](QAbstractButton* button) {
+		QColor color;
+		if (button == use) { color = suggestion; }
+		else if (button == choose)
+		{
+			color = QColorDialog::getColor(suggestion, getGUI()->mainWindow(), tr("Your color"));
+		}
+		if (!color.isValid()) { return; }
+		collab::CollabSession::instance()->setColor(color.name());
+		ConfigManager::inst()->setValue("collab", "color", color.name()); // also next time
+		m_colorChecked.clear(); // compared again with everybody
+	});
+	box->show();
 }
 
 

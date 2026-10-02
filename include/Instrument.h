@@ -53,6 +53,9 @@ class SampleFrame;
 class LMMS_EXPORT Instrument : public Plugin
 {
 public:
+	//! The plugin name saved with the instrument (a placeholder for a missing plugin keeps the missing one's)
+	virtual QString pluginName() const { return descriptor()->name; }
+
 	enum class Flag
 	{
 		NoFlags = 0x00,

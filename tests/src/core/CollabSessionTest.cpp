@@ -41,6 +41,7 @@
 #include "CollabSession.h"
 #include "ConfigManager.h"
 #include "DummyEffect.h"
+#include "DummyInstrument.h"
 #include "Effect.h"
 #include "EffectChain.h"
 #include "ControllerConnection.h"
@@ -236,6 +237,19 @@ private slots:
 		// Like LMMS' default project: one pattern with one Pattern Editor track
 		Track::create(Track::Type::Pattern, Engine::getSong());
 		Track::create(Track::Type::Instrument, Engine::patternStore());
+	}
+
+	//! After a failed test, the session's logs are kept (the workspace is removed at the end)
+	void cleanup()
+	{
+		if (!QTest::currentTestFailed()) { return; }
+		for (const char* name : {"session.log", "session.previous.log"})
+		{
+			const QString kept = QDir::temp().filePath(QString{"CollabSessionTest-%1-%2"}
+				.arg(QTest::currentTestFunction()).arg(name));
+			QFile::remove(kept);
+			QFile::copy(m_dataDir.filePath(QString{"workspace/collab/"} + name), kept);
+		}
 	}
 
 	void cleanupTestCase()
@@ -868,18 +882,22 @@ private slots:
 		QVERIFY(!m_peer.nextForeignOp("track.state").isEmpty());
 
 		// The peer sends the same plugin with new state: applied to the existing instrument, not echoed
+		// (the placeholder for the missing "kicker" keeps that name and the settings it gets)
 		m_peer.drain();
 		const Instrument* before = track->instrument();
+		QCOMPARE(before->pluginName(), QString{"kicker"});
 		m_peer.sendOps({QJsonObject{{"op", "instrument.set"}, {"track", id},
-			{"xml", R"(<instrument name="dummy"><dummyinstrument/></instrument>)"}}});
+			{"xml", R"(<instrument name="kicker"><kicker startfreq="150"/></instrument>)"}}});
 		settle(300);
 		QCOMPARE(track->instrument(), before);
+		QVERIFY(instrumentXmlOf(track).contains("startfreq=\"150\""));
 		QVERIFY2(m_peer.nextForeignOp("instrument.set", 500).isEmpty(), "no echo of a remote instrument state");
 
 		// ...and another plugin: the instrument is replaced, still without echo
 		m_peer.sendOps({QJsonObject{{"op", "instrument.set"}, {"track", id},
 			{"xml", R"(<instrument name="tripleoscillator"><tripleoscillator/></instrument>)"}}});
-		QTRY_VERIFY(track->instrument() != before);
+		// (by name: the new placeholder may well get the old one's address)
+		QTRY_COMPARE(track->instrument()->pluginName(), QString{"tripleoscillator"});
 		QVERIFY2(m_peer.nextForeignOp("instrument.set", 500).isEmpty(), "no echo of a remote instrument");
 
 		// Effects added here reach the peer
@@ -1325,6 +1343,73 @@ private slots:
 
 	// ---- M7b: reconnecting ----
 
+	void testMissingPlugin()
+	{
+		auto session = CollabSession::instance();
+		// The session's log, kept for a look if this fails (later tests reconnect and rotate it)
+		const auto keepLog = qScopeGuard([this] {
+			const QString kept = QDir::temp().filePath("CollabSessionTest-missing-plugin.log");
+			QFile::remove(kept);
+			QFile::copy(m_dataDir.filePath("workspace/collab/session.log"), kept);
+		});
+		QStringList missing;
+		auto c = connect(session, &CollabSession::missingPlugins, [&](const QStringList& names) { missing += names; });
+		auto track = dynamic_cast<InstrumentTrack*>(Track::create(Track::Type::Instrument, Engine::getSong()));
+		QVERIFY(track);
+		session->flushAll();
+		QVERIFY(session->waitUntilSaved(3000));
+		const QString trackId = proto::idString(track->collabId());
+		// A collaborator gives the track a plugin this computer does not have
+		const QString instrument = "<instrument name=\"nonexistentsynth\"><nonexistentsynth secret=\"42\" knob=\"0.7\"/></instrument>";
+		m_peer.sendOps({QJsonObject{{"op", "instrument.set"}, {"track", trackId}, {"xml", instrument}},
+			QJsonObject{{"op", "track.state"}, {"id", trackId},
+				{"xml", "<instrumenttrack vol=\"100\" pan=\"0\">" + instrument + "</instrumenttrack>"}}});
+		QTRY_VERIFY_WITH_TIMEOUT(dynamic_cast<DummyInstrument*>(track->instrument()), 5000);
+		QCOMPARE(track->instrument()->pluginName(), QString{"nonexistentsynth"});
+		// Told once, without a message box (the tests load no plugins, so others may be listed too)
+		QTRY_VERIFY_WITH_TIMEOUT(missing.contains("nonexistentsynth"), 3000);
+		QCOMPARE(missing.count("nonexistentsynth"), 1);
+		// This user changes the track: what reaches the server still has the plugin and its settings
+		// (after a moment, as a person would: a new track's knobs are watched from the next tick on)
+		settle(300);
+		track->volumeModel()->setValue(42);
+		QString lastSettings;
+		const auto pluginKept = [&] {
+			const QDomDocument doc = serverSnapshot();
+			const QDomNodeList tracks = doc.elementsByTagName("track");
+			for (int i = 0; i < tracks.size(); ++i)
+			{
+				const QDomElement t = tracks.at(i).toElement();
+				if (t.attribute("cid") != trackId) { continue; }
+				const QDomElement settings = t.firstChildElement("instrumenttrack");
+				lastSettings = toString(settings);
+				const QDomElement plugin = settings.firstChildElement("instrument").firstChildElement("nonexistentsynth");
+				return settings.attribute("vol").toDouble() == 42 && plugin.attribute("secret") == "42";
+			}
+			return false;
+		};
+		QTRY_VERIFY2_WITH_TIMEOUT(pluginKept(), qPrintable(lastSettings.left(600)), 8000);
+		disconnect(c);
+	}
+
+	void testColorChange()
+	{
+		auto session = CollabSession::instance();
+		session->sendPresence({});
+		session->setColor("#12ab34");
+		QCOMPARE(session->userColor(), QString{"#12ab34"});
+		// The others see the new color right away
+		QElapsedTimer timer;
+		timer.start();
+		bool seen = false;
+		while (!seen && timer.elapsed() < 5000)
+		{
+			const auto presence = m_peer.next("presence", 500);
+			seen = presence.value("color").toString() == "#12ab34";
+		}
+		QVERIFY(seen);
+	}
+
 	void testVersions()
 	{
 		auto session = CollabSession::instance();
@@ -1378,6 +1463,9 @@ private slots:
 			return false;
 		};
 		created = {};
+		session->flushAll();
+		QVERIFY(session->waitUntilSaved(3000));
+		m_peer.drain();
 		session->restoreVersion(id);
 		// ...is gone for everyone once the version is restored, and kept in the safety version
 		QTRY_VERIFY_WITH_TIMEOUT(!restored.isEmpty(), 5000);
@@ -1385,6 +1473,9 @@ private slots:
 		QCOMPARE(restored.value("by").toString(), session->userName());
 		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 10000);
 		QVERIFY(!hasTrack());
+		// Loading the restored project is not a change of this user: nothing is sent back
+		QVERIFY2(m_peer.nextForeignOp("instrument.set", 1000).isEmpty(), "no instrument echoed after a restore");
+		QVERIFY2(m_peer.nextForeignOp("effects.set", 300).isEmpty(), "no effects echoed after a restore");
 		QCOMPARE(created.value("description").toString(), QString{"Before restoring version %1"}.arg(id));
 		QFile safety{m_dataDir.filePath(QString{"projects/session-test/versions/%1/project.mmp"}
 			.arg(restored.value("safety").toInt()))};
@@ -1597,6 +1688,16 @@ private:
 		watcher.send({{"t", "open"}, {"project", "session-test"}});
 		doc.setContent(watcher.next("joined").value("mmp").toString());
 		return doc;
+	}
+
+	//! The track's instrument as LMMS saves it
+	static QString instrumentXmlOf(InstrumentTrack* track)
+	{
+		QDomDocument doc;
+		QDomElement parent = doc.createElement("t");
+		doc.appendChild(parent);
+		track->saveState(doc, parent);
+		return toString(parent.firstChildElement().firstChildElement("instrumenttrack").firstChildElement("instrument"));
 	}
 
 	static QString toString(const QDomElement& e)

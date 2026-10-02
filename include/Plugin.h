@@ -25,6 +25,8 @@
 #ifndef LMMS_PLUGIN_H
 #define LMMS_PLUGIN_H
 
+#include <functional>
+
 #include <QStringList>
 #include <QMap>
 
@@ -295,6 +297,11 @@ public:
 	//! @param parent The parent Model
 	//! @param data Anything the plugin expects. If this is a pointer to a sub plugin key, use instantiateWithKey instead
 	static Plugin* instantiate(const QString& pluginName, Model* parent, void* data);
+
+	//! Told about every plugin that is not available here (name, reason); returns true if it lets the user know
+	//! itself (then LMMS shows no message box). E.g. a collaboration session lists them all in one notice.
+	using MissingPluginHandler = std::function<bool(const QString& name, const QString& reason)>;
+	static void setMissingPluginHandler(MissingPluginHandler handler);
 
 	//! Create a view for the model
 	gui::PluginView * createView( QWidget * parent );

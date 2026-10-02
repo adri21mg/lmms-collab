@@ -250,6 +250,18 @@ void CollabServer::handleMessage(Client& client, const QJsonObject& message)
 	else if (t == proto::msg::Open) { handleOpen(client, message); }
 	else if (t == proto::msg::Tx) { handleTx(client, message); }
 	else if (t == proto::msg::Presence) { handlePresence(client, message); }
+	else if (t == proto::msg::Color)
+	{
+		const auto color = proto::validColor(message.value("color"));
+		if (!color) { return; }
+		client.color = *color;
+		if (client.project && !client.presence.isEmpty())
+		{
+			// The others see it right away, not only at the next move
+			client.presence.insert("color", client.color);
+			broadcast(client.project, client.presence, &client);
+		}
+	}
 	else if (t == proto::msg::AssetPut) { handleAssetPut(client, message); }
 	else if (t == proto::msg::AssetGet) { handleAssetGet(client, message); }
 	else if (t == proto::msg::VersionCreate) { handleVersionCreate(client, message); }
@@ -471,6 +483,8 @@ void CollabServer::handleTx(Client& client, const QJsonObject& message)
 		p->dirty = true;
 	}
 	++p->seq;
+	// A transaction that changed nothing leaves nothing to save (otherwise "saved" would lag behind forever)
+	if (!p->dirty) { p->savedSeq = p->seq; }
 	if (rejected > 0)
 	{
 		qInfo("[%s] tx %lld: %lld ops applied, %d rejected", qPrintable(client.clientId), p->seq,

@@ -32,6 +32,8 @@
 
 #include <cstring>
 
+#include <QDomDocument>
+
 #include "AudioEngine.h"
 
 
@@ -42,10 +44,39 @@ namespace lmms
 class DummyInstrument : public Instrument
 {
 public:
-	DummyInstrument( InstrumentTrack * _instrument_track ) :
-		Instrument( _instrument_track, nullptr )
+	//! @p missingPlugin: the plugin this stands for, when it is not available here
+	DummyInstrument( InstrumentTrack * _instrument_track, const QString& missingPlugin = {} ) :
+		Instrument( _instrument_track, nullptr ),
+		m_missingPlugin(missingPlugin)
 	{
 	}
+
+	//! The plugin's own settings are kept as they were loaded and saved again unchanged, so a project that
+	//! uses a plugin this computer does not have keeps them (for whoever has it, e.g. a collaborator)
+	QDomElement saveState(QDomDocument& doc, QDomElement& parent) override
+	{
+		const QDomElement original = m_original.documentElement();
+		if (original.isNull()) { return Instrument::saveState(doc, parent); }
+		QDomElement copy = doc.importNode(original, true).toElement();
+		parent.appendChild(copy);
+		return copy;
+	}
+
+	void restoreState(const QDomElement& element) override
+	{
+		m_original = QDomDocument{};
+		if (!element.isNull() && !m_missingPlugin.isEmpty())
+		{
+			m_original.appendChild(m_original.importNode(element, true));
+		}
+	}
+
+	QString pluginName() const override
+	{
+		return m_missingPlugin.isEmpty() ? Instrument::pluginName() : m_missingPlugin;
+	}
+
+	const QString& missingPlugin() const { return m_missingPlugin; }
 
 	~DummyInstrument() override = default;
 
@@ -71,6 +102,10 @@ public:
 	{
 		return new gui::InstrumentViewFixedSize( this, _parent );
 	}
+
+private:
+	QString m_missingPlugin;
+	QDomDocument m_original;
 } ;
 
 

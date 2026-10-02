@@ -77,7 +77,7 @@ Instrument *Instrument::instantiate(const QString &_plugin_name,
 	if(dynamic_cast<Instrument *>(p))
 		return dynamic_cast<Instrument *>(p);
 	delete p;
-	return( new DummyInstrument( _instrument_track ) );
+	return new DummyInstrument(_instrument_track, _plugin_name);
 }
 
 

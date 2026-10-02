@@ -32,6 +32,7 @@
 #include <QColor>
 #include <QJsonObject>
 #include <QPointer>
+#include <QSet>
 #include <QTimer>
 #include <QWidget>
 
@@ -117,6 +118,11 @@ private:
 	void updateOverlays();
 
 	MainWindow* m_mainWindow;
+	//! A collaborator's color is nearly this user's: the one who connected later is asked to change
+	void checkColor(const QString& clientId, const User& user);
+	void askOtherColor(const QString& name);
+	QSet<QString> m_colorChecked; //!< collaborators already compared with this user's color
+
 	std::map<QString, User> m_users;
 	std::map<QWidget*, QPointer<CursorOverlay>> m_overlays;
 	QTimer m_sampleTimer;

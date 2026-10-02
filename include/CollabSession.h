@@ -141,6 +141,10 @@ public:
 	//! Where this user is: {cursor, play, view}, see proto::sanitizePresence; ignored unless connected
 	void sendPresence(const QJsonObject& presence);
 	QString userColor() const { return m_color; }
+	//! This user's color from now on (also for the others)
+	void setColor(const QString& color);
+	//! The server's name for this connection ("c12"); later connections have larger numbers
+	QString clientId() const { return m_clientId; }
 	void disconnectFromServer();
 	//! Leaves the session for good (also stops reconnecting)
 	void leave();
@@ -188,6 +192,8 @@ signals:
 	//! The server's Perforce submit of a version ended: p4 = {state, change?, error?}
 	void versionPerforce(int id, const QJsonObject& p4);
 	void versionsReceived(const QJsonArray& versions);
+	//! Plugins this project uses that are not installed here (each one told once per session)
+	void missingPlugins(const QStringList& names);
 	//! The server's certificate is not the one remembered for it (the connection was refused)
 	void serverCertificateChanged(const QString& host, quint16 port, const QString& fingerprint);
 	//! A version request could not be done (the session goes on)
@@ -283,6 +289,10 @@ private:
 	void fail(const QString& message);
 	void send(const QJsonObject& message);
 	void sendOps(const QJsonArray& ops);
+	//! A plugin the project uses is not installed here: the user is told (once, together with others)
+	void notePluginMissing(const QString& name, const QString& reason);
+	//! Forgets what is known about the project (baselines, pending changes); the connection stays
+	void forgetProjectState();
 	//! A version was restored: the project is loaded again from what the server sent
 	void reloadRestored(const QJsonObject& message);
 	//! Joining: removes clips the shared project @p mmp does not have (made by LMMS while it was loading)
@@ -574,7 +584,9 @@ private:
 	QString m_offlineSnapshot;                   //!< the project when the connection was lost (to see what changed)
 	bool m_unsentAtLoss = false;
 	bool m_hadOfflineChanges = false;
-	bool m_rejectedChanges = false;              //!< reloading because the server did not take some of our changes
+	bool m_rejectedChanges = false;
+	QSet<QString> m_missingPlugins;              //!< told to the user in this session
+	QStringList m_newMissingPlugins;             //!< to tell (together, a moment later)              //!< reloading because the server did not take some of our changes
 	QMap<qint64, QJsonArray> m_unacknowledgedOps; //!< by ctx, until the server acknowledged them                 //!< own changes had not reached the server when it was lost
 	bool m_sharedFilesRefresh = false;           //!< a refresh of the "Shared project" tab is scheduled
 	QSet<collab_id_t> m_forcePluginCheck;        //!< instruments whose state must be compared at the next flush
