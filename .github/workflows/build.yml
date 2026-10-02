@@ -81,6 +81,9 @@ jobs:
         run: |
           cd build/tests
           ctest --output-on-failure -j2
+      - name: Show test results
+        if: failure()
+        run: cat build/tests/*.log
       - name: Package
         run: |
           cmake --build build --target package
@@ -165,6 +168,9 @@ jobs:
         run: |
           cd build/tests
           ctest --output-on-failure -j2
+      - name: Show test results
+        if: failure()
+        run: cat build/tests/*.log
       - name: Package
         run: |
           cmake --build build --target package
@@ -261,6 +267,9 @@ jobs:
         run: |
           cd build/tests
           ctest --output-on-failure -j3
+      - name: Show test results
+        if: failure()
+        run: cat build/tests/*.log
       - name: Package
         run: |
           cmake --build build --target package
@@ -434,6 +443,9 @@ jobs:
         run: |
           cd build/tests
           ctest --output-on-failure -j2
+      - name: Show test results
+        if: failure()
+        run: cat build/tests/*.log
       - name: Package
         run: cmake --build build --target package
       - name: Upload artifacts

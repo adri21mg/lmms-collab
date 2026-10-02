@@ -21,7 +21,8 @@ foreach(LMMS_TEST_SRC IN LISTS LMMS_TESTS)
 	get_filename_component(LMMS_TEST_NAME ${LMMS_TEST_SRC} NAME_WE)
 
 	add_executable(${LMMS_TEST_NAME} ${LMMS_TEST_SRC})
-	add_test(NAME ${LMMS_TEST_NAME} COMMAND ${LMMS_TEST_NAME})
+	# Results also in a file: test programs may have no console on Windows (CI shows the file on failure)
+	add_test(NAME ${LMMS_TEST_NAME} COMMAND ${LMMS_TEST_NAME} -o ${CMAKE_CURRENT_BINARY_DIR}/${LMMS_TEST_NAME}.log,txt -o -,txt)
 
 	# TODO CMake 3.12: Propagate usage requirements by linking to lmmsobjs
 	target_include_directories(${LMMS_TEST_NAME} PRIVATE $<TARGET_PROPERTY:lmmsobjs,INCLUDE_DIRECTORIES>)
