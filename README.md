@@ -10,8 +10,9 @@
 		⦁︎
 		<a href="collab/deploy/README.md">Run a server</a>
 		⦁︎
-		<a href="https://ko-fi.com/systmstudio">Support on Ko-fi</a>
+		<a href="https://systmstudio.com">systmstudio.com</a>
 	</p>
+	<p><a href="https://ko-fi.com/systmstudio"><img src="https://systmstudio.com/media/kofi-sparkle.gif" width="32" height="32" alt="" align="center"> <b>Support me on Ko-fi</b></a></p>
 </div>
 
 <!-- GIFs: collab/assets/ -->
@@ -36,7 +37,8 @@ Everything else is LMMS as you know it.
    is not signed: *More info → Run anyway*.
 2. **One of you hosts:** *Collaboration → Connect... → Host a session*, or run an always-on server on a PC or
    Ubuntu machine: [server guide](collab/deploy/README.md).
-3. **The others join:** *Collaboration → Connect...*, the server's address and password, and pick the project.
+3. **The others join:** *Collaboration → Connect...*, the server's address with its port (e.g. `100.64.1.2:42871`;
+   *Host a session* shows the exact ones to send), the password, and pick the project.
 
 Playing with friends over the internet? [Tailscale](https://tailscale.com) is the easy and safe way: no ports to open.
 
@@ -44,10 +46,12 @@ Windows only for now. Based on LMMS 1.3.0-alpha.
 
 ## Credits
 
-- **LMMS-Collab** by Adri ([Systm Studio](https://ko-fi.com/systmstudio)), built entirely with
+- **LMMS-Collab** by Adri, [Systm Studio](https://systmstudio.com), built entirely with
   [Claude](https://claude.com) by Anthropic.
 - **LMMS** by the [LMMS developers](https://github.com/LMMS/lmms): all the credit for LMMS itself is theirs.
   LMMS-Collab is not affiliated with or endorsed by the LMMS project.
 - License: [GPL-2.0-or-later](LICENSE.txt), like LMMS.
 
-If LMMS-Collab is useful to you, you can [support it on Ko-fi](https://ko-fi.com/systmstudio). ☕
+If LMMS-Collab is useful to you:
+
+<p align="center"><a href="https://ko-fi.com/systmstudio"><img src="https://systmstudio.com/media/kofi-sparkle.gif" width="32" height="32" alt="" align="center"> <b>Support me on Ko-fi</b></a></p>
