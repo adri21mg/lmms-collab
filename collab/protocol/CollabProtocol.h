@@ -165,6 +165,9 @@ inline constexpr auto AssetError = "asset.error";
  *   the server's Perforce submit ends later -> everyone: version.p4 {id, p4}
  *   versions.get                           -> versions {versions: [version, ...]} (oldest first)
  *   a request that cannot be done          -> version.error {message} (the session goes on)
+ *   version.restore {id}                   -> the project as it is now becomes a version first (safety), then
+ *                                             everyone: version.restored {id, by, description, safety, seq, mmp,
+ *                                             library, savedSeq} and loads the project again
  * version: {id, description, by, at (ISO date, UTC), seq, p4}
  * p4: {state: "off" | "pending" | "submitted" | "unchanged" | "failed", change?, error?}
  */
@@ -174,6 +177,8 @@ inline constexpr auto VersionP4 = "version.p4";
 inline constexpr auto VersionsGet = "versions.get";
 inline constexpr auto Versions = "versions";
 inline constexpr auto VersionError = "version.error";
+inline constexpr auto VersionRestore = "version.restore";
+inline constexpr auto VersionRestored = "version.restored";
 } // namespace msg
 
 //! Longest version description

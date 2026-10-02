@@ -528,6 +528,29 @@ void CollabSession::requestVersions()
 }
 
 
+void CollabSession::restoreVersion(int id)
+{
+	if (m_state != State::Live) { return; }
+	flushAll(); // so the safety version has everything
+	send({{"t", proto::msg::VersionRestore}, {"id", id}});
+}
+
+
+void CollabSession::reloadRestored(const QJsonObject& message)
+{
+	log(QString{"version %1 restored by %2 (the state before is version %3): reloading"}
+		.arg(message.value("id").toInt()).arg(message.value("by").toString()).arg(message.value("safety").toInt()));
+	// What is still waiting was made on the project before the restore; it is gone with it
+	m_txQueue.clear();
+	stopTracking();
+	setState(State::Joining);
+	emit versionRestored(message);
+	// Like joining: the same project, as the server has it now
+	handleJoined({{"project", m_project}, {"seq", message.value("seq")}, {"mmp", message.value("mmp")},
+		{"library", message.value("library")}, {"savedSeq", message.value("savedSeq")}});
+}
+
+
 void CollabSession::log(const QString& line)
 {
 	if (!m_log) { return; }
@@ -615,6 +638,7 @@ void CollabSession::handleMessage(const QJsonObject& message)
 	}
 	else if (t == proto::msg::Versions) { emit versionsReceived(message.value("versions").toArray()); }
 	else if (t == proto::msg::VersionError) { emit versionError(message.value("message").toString()); }
+	else if (t == proto::msg::VersionRestored) { reloadRestored(message); }
 	else if (t == proto::msg::Saved)
 	{
 		m_savedSeq = message.value("seq").toInteger();

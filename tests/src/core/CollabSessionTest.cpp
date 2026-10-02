@@ -1358,6 +1358,48 @@ private slots:
 		disconnect(c3);
 	}
 
+	void testRestoreVersion()
+	{
+		auto session = CollabSession::instance();
+		QJsonObject created, restored;
+		QJsonArray listed;
+		auto c1 = connect(session, &CollabSession::versionCreated, [&](const QJsonObject& v) { created = v; });
+		auto c2 = connect(session, &CollabSession::versionRestored, [&](const QJsonObject& r) { restored = r; });
+		auto c3 = connect(session, &CollabSession::versionsReceived, [&](const QJsonArray& v) { listed = v; });
+		session->createVersion("Before the bridge");
+		QTRY_VERIFY_WITH_TIMEOUT(!created.isEmpty(), 5000);
+		const int id = created.value("id").toInt();
+		// A change after that version...
+		auto track = Track::create(Track::Type::Instrument, Engine::getSong());
+		track->setName("Bridge idea");
+		const auto hasTrack = [] {
+			for (Track* t : Engine::getSong()->tracks()) { if (t->name() == "Bridge idea") { return true; } }
+			return false;
+		};
+		created = {};
+		session->restoreVersion(id);
+		// ...is gone for everyone once the version is restored, and kept in the safety version
+		QTRY_VERIFY_WITH_TIMEOUT(!restored.isEmpty(), 5000);
+		QCOMPARE(restored.value("id").toInt(), id);
+		QCOMPARE(restored.value("by").toString(), session->userName());
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 10000);
+		QVERIFY(!hasTrack());
+		QCOMPARE(created.value("description").toString(), QString{"Before restoring version %1"}.arg(id));
+		QFile safety{m_dataDir.filePath(QString{"projects/session-test/versions/%1/project.mmp"}
+			.arg(restored.value("safety").toInt()))};
+		QVERIFY(safety.open(QIODevice::ReadOnly));
+		QVERIFY(safety.readAll().contains("Bridge idea"));
+		// The session goes on in the restored project
+		auto after = Track::create(Track::Type::Instrument, Engine::getSong());
+		after->setName("After the restore");
+		session->flushAll();
+		QVERIFY(session->waitUntilSaved(3000));
+		QCOMPARE(session->state(), CollabSession::State::Live);
+		disconnect(c1);
+		disconnect(c2);
+		disconnect(c3);
+	}
+
 	void testRejectedChanges()
 	{
 		auto session = CollabSession::instance();

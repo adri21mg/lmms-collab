@@ -139,6 +139,33 @@ CollabMenu::CollabMenu(MainWindow* mainWindow) :
 		if (m_versionsDialog) { CollabSession::instance()->requestVersions(); }
 	});
 	connect(session, &CollabSession::versionsReceived, this, &CollabMenu::fillVersions);
+	connect(session, &CollabSession::versionRestored, this, [this](const QJsonObject& restore) {
+		const int id = restore.value("id").toInt();
+		const QString by = restore.value("by").toString();
+		const QString description = restore.value("description").toString().section('\n', 0, 0);
+		const int safety = restore.value("safety").toInt();
+		if (by == CollabSession::instance()->userName())
+		{
+			TextFloat::displayMessage(tr("Version %1 restored").arg(id),
+				tr("You restored version %1 (\"%2\").").arg(id).arg(description) + "\n"
+					+ tr("How it was before is kept as version %1.").arg(safety),
+				embed::getIconPixmap("project_save"), 10000);
+			return;
+		}
+		// For the others the project changed under their hands: say so clearly, once it is loaded again
+		// (not modal: the session goes on)
+		QTimer::singleShot(0, this, [this, id, by, description, safety] {
+			auto box = new QMessageBox{QMessageBox::Information, tr("Version %1 restored").arg(id),
+				tr("%1 restored version %2 (\"%3\"): the project is now as it was in that version.").arg(by).arg(id)
+					.arg(description) + "\n\n"
+					+ tr("Nothing was lost: how it was just before is kept as version %1 (Collaboration > Versions...).")
+						.arg(safety),
+				QMessageBox::Ok, m_mainWindow};
+			box->setAttribute(Qt::WA_DeleteOnClose);
+			box->setModal(false);
+			box->show();
+		});
+	});
 	connect(session, &CollabSession::versionError, this, [this](const QString& message) {
 		QMessageBox::warning(m_mainWindow, tr("Versions"), message);
 	});
@@ -536,11 +563,39 @@ void CollabMenu::showVersions()
 	auto buttons = new QDialogButtonBox{QDialogButtonBox::Close, dialog};
 	auto create = buttons->addButton(tr("Create version..."), QDialogButtonBox::ActionRole);
 	connect(create, &QPushButton::clicked, this, &CollabMenu::createVersion);
+	auto restore = buttons->addButton(tr("Restore this version..."), QDialogButtonBox::ActionRole);
+	restore->setEnabled(false);
+	restore->setToolTip(tr("Makes the selected version the project again, for everyone"));
+	connect(m_versionsList, &QTreeWidget::itemSelectionChanged, restore, [this, restore] {
+		restore->setEnabled(!m_versionsList->selectedItems().isEmpty());
+	});
+	connect(restore, &QPushButton::clicked, this, &CollabMenu::restoreSelectedVersion);
+	connect(m_versionsList, &QTreeWidget::itemDoubleClicked, this, &CollabMenu::restoreSelectedVersion);
 	connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
 	layout->addWidget(buttons);
 	m_versionsDialog = dialog;
 	dialog->show();
 	session->requestVersions();
+}
+
+
+void CollabMenu::restoreSelectedVersion()
+{
+	auto session = CollabSession::instance();
+	if (!m_versionsDialog || m_versionsList->selectedItems().isEmpty()
+		|| session->state() != CollabSession::State::Live)
+	{
+		return;
+	}
+	const QTreeWidgetItem* item = m_versionsList->selectedItems().first();
+	const int id = item->text(0).toInt();
+	const auto answer = QMessageBox::question(m_versionsDialog,
+		tr("Restore version %1").arg(id),
+		tr("Restore version %1 (\"%2\")?\n\nThe project goes back to how it was in that version, for everyone in the "
+			"session. Nothing is lost: how it is now is kept as a new version first, so you can come back to it.")
+			.arg(id).arg(item->text(3)),
+		QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+	if (answer == QMessageBox::Yes) { session->restoreVersion(id); }
 }
 
 

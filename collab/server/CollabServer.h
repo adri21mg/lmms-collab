@@ -115,6 +115,10 @@ private:
 	void handleList(Client& client);
 	void handleVersionCreate(Client& client, const QJsonObject& message);
 	void handleVersionsGet(Client& client);
+	void handleVersionRestore(Client& client, const QJsonObject& message);
+	//! A version of the project as it is now (also submitted to Perforce); nullopt with @p error if it failed
+	std::optional<QJsonObject> createVersion(Project& project, const Client& client, const QString& description,
+		QString& error);
 	//! Versions of a project, oldest first
 	QJsonArray versionList(const QString& project) const;
 	bool writeVersion(const QString& project, const QJsonObject& version);

@@ -197,6 +197,7 @@ void CollabServer::handleMessage(Client& client, const QJsonObject& message)
 	else if (t == proto::msg::AssetGet) { handleAssetGet(client, message); }
 	else if (t == proto::msg::VersionCreate) { handleVersionCreate(client, message); }
 	else if (t == proto::msg::VersionsGet) { handleVersionsGet(client); }
+	else if (t == proto::msg::VersionRestore) { handleVersionRestore(client, message); }
 	else { sendError(client, "unknown message type " + t.left(32)); }
 }
 
@@ -617,10 +618,57 @@ void CollabServer::handleVersionCreate(Client& client, const QJsonObject& messag
 	const QString description = message.value("description").toString().trimmed();
 	if (description.isEmpty()) { return refuse("a version needs a description"); }
 	if (description.size() > proto::MaxVersionDescription) { return refuse("the description is too long"); }
+	QString error;
+	if (!createVersion(*p, client, description, error)) { refuse(error); }
+}
+
+
+void CollabServer::handleVersionRestore(Client& client, const QJsonObject& message)
+{
+	auto refuse = [&](const QString& text) { send(client, {{"t", proto::msg::VersionError}, {"message", text}}); };
+	Project* p = client.project;
+	if (!p) { return refuse("not in a project"); }
+	const int id = message.value("id").toInt();
+	QJsonObject restored;
+	for (const QJsonValue& v : versionList(p->name))
+	{
+		if (v.toObject().value("id").toInt() == id) { restored = v.toObject(); }
+	}
+	if (id <= 0 || restored.isEmpty()) { return refuse(QString{"there is no version %1"}.arg(id)); }
+	QFile file{projectDir(p->name) + "/" + VersionsDir + "/" + QString::number(id) + "/project.mmp"};
+	QString error;
+	ProjectState check;
+	const QByteArray mmp = file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray{};
+	if (!check.load(mmp, error)) { return refuse(QString{"version %1 cannot be read: %2"}.arg(id).arg(error)); }
+
+	// Nothing is lost: the project as it is now becomes a version first
+	const auto safety = createVersion(*p, client, QString{"Before restoring version %1"}.arg(id), error);
+	if (!safety) { return refuse(error); }
+	if (!p->state.load(mmp, error)) { return refuse(error); } // cannot fail: it was read above
+	++p->seq;
+	p->dirty = true;
+	if (saveProject(*p)) { announceSaved(*p); }
+	qInfo("[%s] %s restored version %d of \"%s\" (the state before is version %d)", qPrintable(client.clientId),
+		qPrintable(client.user), id, qPrintable(p->name), safety->value("id").toInt());
+	// Everybody loads the project again (shared files are never removed, so the library has all it uses)
+	broadcast(p, {{"t", proto::msg::VersionRestored}, {"id", id}, {"by", client.user},
+		{"description", restored.value("description")}, {"safety", safety->value("id")}, {"seq", p->seq},
+		{"mmp", QString::fromUtf8(p->state.toMmp())}, {"library", libraryList(*p)}, {"savedSeq", p->savedSeq}});
+}
+
+
+std::optional<QJsonObject> CollabServer::createVersion(Project& target, const Client& client,
+	const QString& description, QString& error)
+{
+	Project* p = &target;
 	// The version is the project as it is now: every transaction before this request is in it
 	if (p->dirty)
 	{
-		if (!saveProject(*p)) { return refuse("the project could not be saved on the server"); }
+		if (!saveProject(*p))
+		{
+			error = "the project could not be saved on the server";
+			return std::nullopt;
+		}
 		announceSaved(*p);
 	}
 	const QJsonArray versions = versionList(p->name);
@@ -639,20 +687,24 @@ void CollabServer::handleVersionCreate(Client& client, const QJsonObject& messag
 	if (!ok || !writeVersion(p->name, version))
 	{
 		QDir{dir}.removeRecursively();
-		return refuse("the version could not be written on the server");
+		error = "the version could not be written on the server";
+		return std::nullopt;
 	}
 	qInfo("[%s] %s created version %d of \"%s\": %s", qPrintable(client.clientId), qPrintable(client.user), id,
 		qPrintable(p->name), qPrintable(description.section('\n', 0, 0).left(80)));
 	broadcast(p, {{"t", proto::msg::VersionCreated}, {"version", version}});
 
-	if (!m_p4) { return; }
-	P4Job job{id, {p->name, mmp, {}, description + "\n\n(" + client.user + ", LMMS-Collab version " + QString::number(id) + ")"}};
-	for (const Project::Asset& asset : p->library)
+	if (m_p4)
 	{
-		job.job.files.append({asset.path, projectDir(p->name) + "/" + LibraryDir + "/" + asset.path});
+		P4Job job{id, {p->name, mmp, {}, description + "\n\n(" + client.user + ", LMMS-Collab version " + QString::number(id) + ")"}};
+		for (const Project::Asset& asset : p->library)
+		{
+			job.job.files.append({asset.path, projectDir(p->name) + "/" + LibraryDir + "/" + asset.path});
+		}
+		m_p4Queue.push_back(std::move(job));
+		startP4Job();
 	}
-	m_p4Queue.push_back(std::move(job));
-	startP4Job();
+	return version;
 }
 
 

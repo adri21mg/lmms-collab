@@ -158,6 +158,8 @@ public:
 	void createVersion(const QString& description);
 	//! Asks the server for the project's versions (answered by versionsReceived)
 	void requestVersions();
+	//! Asks the server to make version @p id the project again, for everyone (the state before becomes a version)
+	void restoreVersion(int id);
 
 	//! Sends local changes right away instead of at the next throttle tick (used by tests)
 	void flushAll();
@@ -182,6 +184,8 @@ signals:
 	void versionsReceived(const QJsonArray& versions);
 	//! A version request could not be done (the session goes on)
 	void versionError(const QString& message);
+	//! Someone restored a version: {id, by, description, safety} (the project is being loaded again)
+	void versionRestored(const QJsonObject& restore);
 
 public:
 	// JournalHook
@@ -271,6 +275,8 @@ private:
 	void fail(const QString& message);
 	void send(const QJsonObject& message);
 	void sendOps(const QJsonArray& ops);
+	//! A version was restored: the project is loaded again from what the server sent
+	void reloadRestored(const QJsonObject& message);
 	//! Joining: removes clips the shared project @p mmp does not have (made by LMMS while it was loading)
 	void removeClipsNotIn(const QString& mmp);
 	//! Ops as one log line (without their XML, with the id of what it holds)

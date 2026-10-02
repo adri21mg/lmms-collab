@@ -55,6 +55,8 @@ private:
 	//! "Versions...": the project's versions (kept open and updated while someone creates one)
 	void showVersions();
 	void fillVersions(const QJsonArray& versions);
+	//! "Restore this version...": asks, then the server makes the selected version the project again
+	void restoreSelectedVersion();
 	bool isHosting() const;
 	//! Addresses of this computer others can connect to (Tailscale first)
 	static QString hostAddresses();
