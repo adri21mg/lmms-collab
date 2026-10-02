@@ -195,6 +195,8 @@ private:
 	MainWindow( const MainWindow & );
 	~MainWindow() override;
 
+	bool m_closing = false; //!< LMMS is being closed (no need to ask about leaving a collaboration session)
+
 	void finalize();
 
 	void toggleWindow( QWidget *window, bool forceShow = false );

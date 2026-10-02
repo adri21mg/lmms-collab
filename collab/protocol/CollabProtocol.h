@@ -132,7 +132,7 @@ namespace lmms::collab::proto
 
 inline constexpr int Version = 2; // 2: password (auth), TLS
 //! LMMS-Collab's release (shown in the title bar and by the server)
-inline constexpr auto CollabVersion = "1.0.0";
+inline constexpr auto CollabVersion = "1.0.1";
 inline constexpr quint16 DefaultPort = 42871;
 //! Largest accepted frame (a full project snapshot must fit)
 inline constexpr quint32 MaxFrameSize = 256u * 1024u * 1024u;

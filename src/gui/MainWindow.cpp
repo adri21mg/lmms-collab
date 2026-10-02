@@ -32,6 +32,7 @@
 #include <QMdiArea>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QScopeGuard>
 #include <QShortcut>
 #include <QSplitter>
 
@@ -614,6 +615,22 @@ bool MainWindow::mayChangeProject(bool stopPlayback)
 	if( stopPlayback )
 	{
 		Engine::getSong()->stop();
+	}
+
+	// In a collaboration session another project means leaving it (closing LMMS does not need to ask)
+	auto session = collab::CollabSession::instance();
+	if (!m_closing && session->state() != collab::CollabSession::State::Disconnected)
+	{
+		const auto answer = QMessageBox::question(this, tr("Leave the collaboration session?"),
+			tr("You are in the collaboration session \"%1\". Opening or starting another project leaves it.\n\n"
+				"The shared project stays on the server as it is: nothing is lost, and you can join it again from "
+				"Collaboration > Connect...").arg(session->projectName()),
+			QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+		if (answer != QMessageBox::Ok) { return false; }
+		session->waitUntilSaved(3000);
+		session->leave();
+		Engine::getSong()->clearModified(); // the shared project is on the server, nothing to save here
+		return true;
 	}
 
 	if( !Engine::getSong()->isModified() && getSession() != SessionState::Recover )
@@ -1257,6 +1274,8 @@ void MainWindow::redo()
 
 void MainWindow::closeEvent( QCloseEvent * _ce )
 {
+	m_closing = true;
+	const auto closing = qScopeGuard([this] { m_closing = false; });
 	if( mayChangeProject(true) )
 	{
 		// delete recovery file

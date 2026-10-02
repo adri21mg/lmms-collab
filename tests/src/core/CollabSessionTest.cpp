@@ -55,6 +55,7 @@
 #include "PatternStore.h"
 #include "PatternTrack.h"
 #include "PathUtil.h"
+#include "ProjectJournal.h"
 #include "SampleClip.h"
 #include "SampleTrack.h"
 #include "Song.h"
@@ -1400,6 +1401,54 @@ private slots:
 		disconnect(c);
 	}
 
+	void testUndoTrackRemoval()
+	{
+		auto session = CollabSession::instance();
+		auto track = dynamic_cast<InstrumentTrack*>(Track::create(Track::Type::Instrument, Engine::getSong()));
+		QVERIFY(track);
+		track->setName("Removed and back");
+		auto clip = new MidiClip(track);
+		clip->addNote(Note{TimePos{48}, TimePos{0}, 64}, false);
+		session->flushAll();
+		QVERIFY(session->waitUntilSaved(slow(3000)));
+		const QString id = proto::idString(track->collabId());
+		// On the server: whether the track is there, and with its note
+		const auto onServer = [this, &id](bool withNote) {
+			const QDomNodeList tracks = serverSnapshot().elementsByTagName("track");
+			for (int i = 0; i < tracks.size(); ++i)
+			{
+				const QDomElement t = tracks.at(i).toElement();
+				if (t.attribute("cid") != id) { continue; }
+				return !withNote || t.firstChildElement("midiclip").firstChildElement("note").attribute("key") == "64";
+			}
+			return false;
+		};
+		QVERIFY(onServer(true));
+
+		// This user removes it (as the editor does: the journal hook is told first)
+		ProjectJournal::hook()->trackAboutToBeRemoved(track);
+		{
+			auto guard = Engine::audioEngine()->requestChangesGuard();
+			delete track;
+		}
+		session->flushAll();
+		QVERIFY(session->waitUntilSaved(slow(3000)));
+		QVERIFY(!onServer(false));
+
+		// Undo: back, with its clip and note, for everyone
+		Engine::projectJournal()->undo();
+		QVERIFY(findTrack(idFromString(id)) != nullptr);
+		QVERIFY(session->waitUntilSaved(slow(3000)));
+		QVERIFY(onServer(true));
+		QCOMPARE(session->state(), CollabSession::State::Live);
+
+		// Redo: removed again
+		Engine::projectJournal()->redo();
+		QVERIFY(findTrack(idFromString(id)) == nullptr);
+		QVERIFY(session->waitUntilSaved(slow(3000)));
+		QVERIFY(!onServer(false));
+	}
+
 	void testColorChange()
 	{
 		auto session = CollabSession::instance();
@@ -1563,6 +1612,28 @@ private slots:
 		QCOMPARE(session->state(), CollabSession::State::Disconnected);
 		settle(1500);
 		QCOMPARE(session->state(), CollabSession::State::Disconnected);
+	}
+
+	void testNewProjectLeaves()
+	{
+		auto session = CollabSession::instance();
+		session->connectToServer("127.0.0.1", m_port, "Adri", "session-test", CollabSession::JoinMode::Open);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, slow(5000));
+		settle(500);
+		const auto trackIds = [this] {
+			QStringList ids;
+			const QDomNodeList tracks = serverSnapshot().elementsByTagName("track");
+			for (int i = 0; i < tracks.size(); ++i) { ids.append(tracks.at(i).toElement().attribute("cid")); }
+			ids.sort();
+			return ids;
+		};
+		const QStringList before = trackIds();
+		QVERIFY(!before.isEmpty());
+		// File > New here: the session ends first, and the shared project is not touched at all
+		Engine::getSong()->createNewProject();
+		QCOMPARE(session->state(), CollabSession::State::Disconnected);
+		settle(1000);
+		QCOMPARE(trackIds(), before);
 	}
 
 	void testPassword()

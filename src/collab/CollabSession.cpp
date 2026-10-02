@@ -65,6 +65,7 @@
 #include "Note.h"
 #include "PatternEditor.h"
 #include "PatternStore.h"
+#include "JournallingObject.h"
 #include "PatternTrack.h"
 #include "SampleClip.h"
 #include "SampleTrack.h"
@@ -183,6 +184,11 @@ CollabSession::CollabSession() :
 		flushParams();
 	});
 	connect(m_trackStateTimer, &QTimer::timeout, this, &CollabSession::sendTrackStates);
+	connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this] {
+		m_shuttingDown = true;
+		if (m_state != State::Disconnected || m_reconnecting) { leave(); }
+		m_undoAnchor.reset(); // while the journal still exists
+	});
 
 	// Plugins that are not installed here: in a session one notice lists them all (instead of a message box
 	// per plugin, possibly in the middle of applying someone else's change); their settings are kept
@@ -210,6 +216,12 @@ void CollabSession::notePluginMissing(const QString& name, const QString& reason
 
 CollabSession::~CollabSession()
 {
+	// LMMS is gone by now: the socket closing below must not look like a lost connection (reconnecting would
+	// take a snapshot of a song that no longer exists)
+	m_shuttingDown = true;
+	(void)m_undoAnchor.release(); // the journal is gone by now: freeing its id would touch it
+	if (m_socket) { m_socket->disconnect(this); }
+	if (m_connection) { m_connection->disconnect(this); }
 	stopTracking();
 }
 
@@ -335,6 +347,8 @@ void CollabSession::forgetProjectState()
 void CollabSession::disconnectFromServer()
 {
 	forgetProjectState();
+	// Undoing a removed track only makes sense in the session it was removed in
+	if (!m_shuttingDown) { m_undoAnchor.reset(); }
 	m_decoder = proto::FrameDecoder{};
 	// Shared files on their way
 	m_downloadQueue.clear();
@@ -388,6 +402,7 @@ bool CollabSession::waitUntilSaved(int timeoutMs)
 
 void CollabSession::startReconnecting()
 {
+	if (m_shuttingDown || !Engine::getSong()) { return; }
 	if (!m_reconnecting)
 	{
 		m_reconnecting = true;
@@ -416,6 +431,7 @@ void CollabSession::startReconnecting()
 
 QString CollabSession::projectSnapshot()
 {
+	if (!Engine::getSong()) { return {}; }
 	QTemporaryDir dir;
 	const QString file = dir.filePath("snapshot.mmp");
 	QFile f{file};
@@ -565,6 +581,12 @@ void CollabSession::resyncAfterRejection()
 
 void CollabSession::sendOps(const QJsonArray& ops)
 {
+	// While a project loads the song is half cleared or half built: nothing of it is a change of this user
+	if (Engine::getSong()->isLoadingProject())
+	{
+		log(QString{"not sent while a project loads: %1"}.arg(opsSummary(ops)));
+		return;
+	}
 	if (m_log)
 	{
 		log(QString{"send ctx %1: %2"}.arg(m_nextCtx).arg(opsSummary(ops)));
@@ -864,7 +886,17 @@ void CollabSession::startTracking()
 	m_structure = currentStructure(); // automation clips name their parameters through the index
 	m_trackStateTimer->start(250);
 
-	// Loading another project replaces every shared object: the session cannot continue
+	// Another project replaces every shared object: the session ends BEFORE anything of it is cleared, or the
+	// clearing would look like this user deleting everything (and be sent to everyone)
+	m_trackConnections.append(connect(Engine::getSong(), &Song::projectAboutToChange, this, [this] {
+		if (m_loadingSnapshot || m_state == State::Disconnected) { return; }
+		log("another project is being loaded or created here: leaving the session");
+		leave();
+		QTimer::singleShot(0, this, [this] {
+			emit errorOccurred(tr("You opened or started another project, so you left the collaboration session. "
+				"The shared project stays on the server as it was."));
+		});
+	}));
 	m_trackConnections.append(connect(Engine::getSong(), &Song::projectLoaded, this, [this] {
 		if (!m_loadingSnapshot && m_state == State::Live)
 		{
@@ -1874,6 +1906,7 @@ void CollabSession::applyRemoteStructureOp(const QJsonObject& op)
 
 bool CollabSession::isShared(JournallingObject* jo) const
 {
+	if (jo && jo == m_undoAnchor.get()) { return true; }
 	if (auto clip = dynamic_cast<Clip*>(jo))
 	{
 		return m_structure.clips.contains(clip->collabId()) || m_baselines.contains(clip->collabId());
@@ -1892,6 +1925,11 @@ std::uint64_t CollabSession::checkPointAdded(JournallingObject* jo)
 	flushAll();
 	const std::uint64_t token = m_nextGesture++;
 	Gesture& gesture = m_gestures[token];
+	if (jo == m_undoAnchor.get())
+	{
+		gesture.removedTrack = std::exchange(m_pendingRemoval, std::nullopt);
+		return token;
+	}
 	if (auto clip = dynamic_cast<Clip*>(jo))
 	{
 		m_openGesture[{static_cast<int>(Kind::Clip), clip->collabId()}] = token;
@@ -1932,9 +1970,107 @@ bool CollabSession::restore(JournallingObject* jo, std::uint64_t token, bool und
 		{
 			it = it.value() == token ? m_openParamGesture.erase(it) : std::next(it);
 		}
-		replayGesture(g->second, undo);
+		if (g->second.removedTrack) { replayRemoval(*g->second.removedTrack, undo); }
+		else { replayGesture(g->second, undo); }
 	}
 	return true;
+}
+
+
+namespace
+{
+
+//! What the journal records when a track is removed: the track itself is gone, so its entry needs an object of
+//! its own (the session keeps what is needed to bring the track back)
+class UndoAnchor : public JournallingObject
+{
+public:
+	QString nodeName() const override { return "collabundo"; }
+	void saveSettings(QDomDocument&, QDomElement&) override {}
+	void loadSettings(const QDomElement&) override {}
+};
+
+} // namespace
+
+
+void CollabSession::trackAboutToBeRemoved(Track* track)
+{
+	if (m_state != State::Live || m_applyingRemote || m_replayingRemoval || !isShared(track)) { return; }
+	TrackContainer* container = track->trackContainer();
+	RemovedTrack removed;
+	removed.id = track->collabId();
+	removed.container = container == Engine::patternStore() ? proto::PatternContainer : proto::SongContainer;
+	removed.xml = serialize(track);
+	for (const Track* t : container->tracks()) { removed.orderBefore.append(t->collabId()); }
+	if (auto pattern = dynamic_cast<PatternTrack*>(track))
+	{
+		// Its content is in the Pattern Editor: the clip of this pattern in every editor track
+		const auto index = static_cast<std::size_t>(pattern->patternIndex());
+		for (Track* editorTrack : Engine::patternStore()->tracks())
+		{
+			const auto& clips = editorTrack->getClips();
+			if (index < clips.size()) { removed.patternClips.append({editorTrack->collabId(), serialize(clips[index])}); }
+		}
+	}
+	if (!m_undoAnchor) { m_undoAnchor = std::make_unique<UndoAnchor>(); }
+	m_pendingRemoval = std::move(removed);
+	Engine::projectJournal()->addJournalCheckPoint(m_undoAnchor.get());
+	m_pendingRemoval.reset();
+}
+
+
+void CollabSession::replayRemoval(const RemovedTrack& removed, bool undo)
+{
+	m_replayingRemoval = true;
+	const auto done = qScopeGuard([this] { m_replayingRemoval = false; });
+	if (!undo)
+	{
+		if (Track* track = findTrack(removed.id)) { removeTrack(track); }
+		flushAll();
+		return;
+	}
+	if (findTrack(removed.id)) { return; }
+	const bool journalling = Engine::projectJournal()->isJournalling();
+	Engine::projectJournal()->setJournalling(false);
+	QDomDocument doc;
+	doc.setContent(removed.xml);
+	if (removed.container == proto::SongContainer && doc.documentElement().attribute("type").toInt() == 1)
+	{
+		// A pattern: its row and its content in the Pattern Editor
+		QJsonArray clips;
+		for (const auto& [editorTrack, xml] : removed.patternClips)
+		{
+			clips.append(QJsonObject{{"track", proto::idString(editorTrack)}, {"xml", xml}});
+		}
+		addRemotePattern({{"xml", removed.xml}, {"clips", clips}});
+	}
+	else
+	{
+		applyRemoteStructureOp({{"op", proto::op::TrackAdd}, {"container", removed.container}, {"index", -1},
+			{"xml", removed.xml}});
+	}
+	Engine::projectJournal()->setJournalling(journalling);
+	// Back where it was: after the track that was before it (if that one is still there)
+	if (TrackContainer* container = removed.container == proto::PatternContainer
+		? static_cast<TrackContainer*>(Engine::patternStore()) : static_cast<TrackContainer*>(Engine::getSong());
+		findTrack(removed.id))
+	{
+		QList<collab_id_t> order;
+		for (const Track* t : container->tracks()) { if (t->collabId() != removed.id) { order.append(t->collabId()); } }
+		qsizetype at = 0;
+		for (qsizetype i = removed.orderBefore.indexOf(removed.id) - 1; i >= 0; --i)
+		{
+			if (const qsizetype found = order.indexOf(removed.orderBefore[i]); found >= 0)
+			{
+				at = found + 1;
+				break;
+			}
+		}
+		order.insert(at, removed.id);
+		reorderTracks(container, order);
+	}
+	log(QString{"undo: track %1 is back"}.arg(proto::idString(removed.id)));
+	flushAll(); // it is new again for the others: sent as added
 }
 
 

@@ -39,6 +39,7 @@ namespace lmms
 
 
 class JournallingObject;
+class Track;
 
 
 //! Lets collaborative editing take part in undo/redo without the journal depending on it
@@ -53,6 +54,8 @@ public:
 	virtual bool restore(JournallingObject* jo, std::uint64_t token, bool undo) = 0;
 	//! Called after the journal restored a snapshot of @p jo itself
 	virtual void restored(JournallingObject* jo) = 0;
+	//! Called before the user removes @p track (e.g. to make it possible to undo that)
+	virtual void trackAboutToBeRemoved(Track* track) { (void)track; }
 };
 
 
@@ -64,6 +67,7 @@ public:
 
 	//! At most one hook; nullptr removes it
 	static void setHook(JournalHook* hook);
+	static JournalHook* hook();
 
 	ProjectJournal();
 	virtual ~ProjectJournal() = default;

@@ -195,6 +195,19 @@ CollabMenu::CollabMenu(MainWindow* mainWindow) :
 		QMessageBox::warning(m_mainWindow, tr("Versions"), message);
 	});
 	updateState();
+
+	// For testing with a real window: LMMS_COLLAB_AUTOCONNECT="host:port|user|project|create" joins at start
+	// (create = 1 shares the current song as that project)
+	const QStringList autoConnect = qEnvironmentVariable("LMMS_COLLAB_AUTOCONNECT").split('|');
+	if (autoConnect.size() == 4)
+	{
+		QTimer::singleShot(1500, this, [autoConnect] {
+			const QString host = autoConnect[0].section(':', 0, -2);
+			const auto port = static_cast<quint16>(autoConnect[0].section(':', -1).toUInt());
+			CollabSession::instance()->connectToServer(host, port, autoConnect[1], autoConnect[2],
+				autoConnect[3] == "1" ? CollabSession::JoinMode::Create : CollabSession::JoinMode::Open);
+		});
+	}
 }
 
 

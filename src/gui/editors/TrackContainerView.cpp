@@ -23,6 +23,7 @@
  */
 
 #include "TrackContainerView.h"
+#include "ProjectJournal.h"
 
 
 #include <QFileInfo>
@@ -291,6 +292,7 @@ void TrackContainerView::deleteTrackView( TrackView * _tv )
 	//m_tc->addJournalCheckPoint();
 
 	Track * t = _tv->getTrack();
+	if (auto hook = ProjectJournal::hook()) { hook->trackAboutToBeRemoved(t); }
 	removeTrackView( _tv );
 	delete _tv;
 

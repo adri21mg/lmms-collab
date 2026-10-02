@@ -205,6 +205,7 @@ public:
 	// JournalHook
 	std::uint64_t checkPointAdded(JournallingObject* jo) override;
 	bool restore(JournallingObject* jo, std::uint64_t token, bool undo) override;
+	void trackAboutToBeRemoved(Track* track) override;
 	void restored(JournallingObject* jo) override;
 
 private:
@@ -275,11 +276,22 @@ private:
 	using ObjectState = std::optional<QJsonObject>; //!< nullopt: the object does not exist
 
 	//! This user's changes during one edit gesture
+	//! A track this user removed, kept to bring it back on undo
+	struct RemovedTrack
+	{
+		collab_id_t id = 0;
+		QString container;                                //!< proto::SongContainer or PatternContainer
+		QString xml;                                      //!< the whole track (instrument, effects, clips)
+		QList<QPair<collab_id_t, QString>> patternClips;  //!< a pattern's content: its clip in each editor track
+		QList<collab_id_t> orderBefore;                   //!< to put it back where it was
+	};
+
 	struct Gesture
 	{
 		QHash<ObjectKey, ObjectState> before;
 		QHash<ObjectKey, ObjectState> after;
 		QHash<collab_id_t, QString> clipXml; //!< to recreate clips this gesture removed (or undo removed)
+		std::optional<RemovedTrack> removedTrack;
 	};
 
 	CollabSession();
@@ -585,6 +597,12 @@ private:
 	bool m_unsentAtLoss = false;
 	bool m_hadOfflineChanges = false;
 	bool m_rejectedChanges = false;
+	bool m_shuttingDown = false;
+	std::unique_ptr<JournallingObject> m_undoAnchor; //!< journal entries for removed tracks (the track is gone)
+	std::optional<RemovedTrack> m_pendingRemoval;
+	bool m_replayingRemoval = false;
+	//! Undo: brings a removed track back (for everyone); redo: removes it again
+	void replayRemoval(const RemovedTrack& removed, bool undo);                 //!< LMMS is quitting: a closed connection is not a lost one
 	QSet<QString> m_missingPlugins;              //!< told to the user in this session
 	QStringList m_newMissingPlugins;             //!< to tell (together, a moment later)              //!< reloading because the server did not take some of our changes
 	QMap<qint64, QJsonArray> m_unacknowledgedOps; //!< by ctx, until the server acknowledged them                 //!< own changes had not reached the server when it was lost

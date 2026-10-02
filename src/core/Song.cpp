@@ -949,6 +949,7 @@ void Song::createNewProject()
 		return;
 	}
 
+	emit projectAboutToChange();
 	m_loadingProject = true;
 
 	clearProject();
@@ -1011,6 +1012,7 @@ void Song::loadProject( const QString & fileName )
 
 	QDomNode node;
 
+	emit projectAboutToChange();
 	m_loadingProject = true;
 
 	Engine::projectJournal()->setJournalling( false );

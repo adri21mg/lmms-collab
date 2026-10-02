@@ -478,6 +478,8 @@ private:
 	friend class gui::ControllerRackView;
 
 signals:
+	//! Another project is about to replace this one (before anything of it is cleared)
+	void projectAboutToChange();
 	void projectLoaded();
 	void playbackStateChanged();
 	void playbackPositionJumped();

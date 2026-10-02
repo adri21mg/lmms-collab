@@ -43,6 +43,12 @@ const int ProjectJournal::MAX_UNDO_STATES = 100; // TODO: make this configurable
 
 static JournalHook* s_hook = nullptr;
 
+
+JournalHook* ProjectJournal::hook()
+{
+	return s_hook;
+}
+
 void ProjectJournal::setHook(JournalHook* hook)
 {
 	s_hook = hook;
