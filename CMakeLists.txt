@@ -266,7 +266,7 @@ if(WANT_QT6)
 	if(MSVC)
 		set(LMMS_QT_MIN_VERSION 6.8.0)
 	else()
-		set(LMMS_QT_MIN_VERSION 6.0.0)
+		set(LMMS_QT_MIN_VERSION 6.4.0) # the collaboration code needs QSslServer
 	endif()
 	set(STATUS_QT6 "Enabled")
 else()

@@ -27,7 +27,8 @@
 		},
 		{
 			"name": "libgig",
-			"default-features": false
+			"default-features": false,
+			"platform": "!mingw"
 		},
 		{
 			"name": "libogg",

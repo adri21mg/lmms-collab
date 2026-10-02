@@ -7,9 +7,10 @@ concurrency:
 jobs:
   linux-x86_64:
     name: linux-x86_64
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       CMAKE_OPTS: >-
+        -DWANT_QT6=ON
         -DUSE_WERROR=ON
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
         -DTARGET_UARCH=official
@@ -102,6 +103,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     env:
       CMAKE_OPTS: >-
+        -DWANT_QT6=ON
         -DUSE_WERROR=ON
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
         -DTARGET_UARCH=official
