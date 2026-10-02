@@ -12,7 +12,7 @@
 		⦁︎
 		<a href="https://systmstudio.com">systmstudio.com</a>
 	</p>
-	<p><a href="https://ko-fi.com/systmstudio"><img src="https://systmstudio.com/media/kofi-sparkle.gif" width="32" height="32" alt="" align="center"> <b>Support me on Ko-fi</b></a></p>
+	<p><a href="https://ko-fi.com/systmstudio"><img src="collab/assets/kofi-button.gif" width="210" alt="Support me on Ko-fi"></a></p>
 </div>
 
 <!-- GIFs: collab/assets/ -->
@@ -54,4 +54,4 @@ Windows only for now. Based on LMMS 1.3.0-alpha.
 
 If LMMS-Collab is useful to you:
 
-<p align="center"><a href="https://ko-fi.com/systmstudio"><img src="https://systmstudio.com/media/kofi-sparkle.gif" width="32" height="32" alt="" align="center"> <b>Support me on Ko-fi</b></a></p>
+<p align="center"><a href="https://ko-fi.com/systmstudio"><img src="collab/assets/kofi-button.gif" width="210" alt="Support me on Ko-fi"></a></p>
