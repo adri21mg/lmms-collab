@@ -707,11 +707,9 @@ void ConfigManager::initPortableWorkingDir()
 
 void ConfigManager::initInstalledWorkingDir()
 {
-	m_workingDir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + "/lmms/";
-	m_lmmsRcFile = QDir::home().absolutePath() +"/.lmmsrc.xml";
-	// Detect < 1.2.0 working directory as a courtesy
-	if ( QFileInfo( QDir::home().absolutePath() + "/lmms/projects/" ).exists() )
-		m_workingDir = QDir::home().absolutePath() + "/lmms/";
+	// LMMS-Collab: its own working folder and settings, next to an installed LMMS without touching its ones
+	m_workingDir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + "/LMMS-Collab/";
+	m_lmmsRcFile = QDir::home().absolutePath() + "/.lmms-collab.xml";
 }
 
 void ConfigManager::initDevelopmentWorkingDir()

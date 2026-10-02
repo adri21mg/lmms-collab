@@ -38,6 +38,7 @@
 #include "AboutDialog.h"
 #include "AutomationEditor.h"
 #include "CollabMenu.h"
+#include "CollabProtocol.h"
 #include "CollabSession.h"
 #include "ControllerRackView.h"
 #include "DeprecationHelper.h"
@@ -602,7 +603,7 @@ void MainWindow::resetWindowTitle()
 		title += " - " + tr( "Recover session. Please save your work!" );
 	}
 
-	setWindowTitle( title + " - " + tr( "LMMS %1" ).arg( LMMS_VERSION ) );
+	setWindowTitle(title + " - " + tr("LMMS-Collab %1 (LMMS %2)").arg(collab::proto::CollabVersion, LMMS_VERSION));
 }
 
 
