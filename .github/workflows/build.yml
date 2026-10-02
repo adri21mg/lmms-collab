@@ -9,9 +9,11 @@ jobs:
     name: linux-x86_64
     runs-on: ubuntu-24.04
     env:
+      # Qt 6 (LMMS-Collab needs 6.4); LMMS itself was never built with Qt 6 on Linux, so its deprecation
+      # warnings must not stop the build
       CMAKE_OPTS: >-
         -DWANT_QT6=ON
-        -DUSE_WERROR=ON
+        -DUSE_WERROR=OFF
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
         -DTARGET_UARCH=official
         -DUSE_COMPILE_CACHE=ON
@@ -105,9 +107,11 @@ jobs:
     name: linux-arm64
     runs-on: ubuntu-24.04-arm
     env:
+      # Qt 6 (LMMS-Collab needs 6.4); LMMS itself was never built with Qt 6 on Linux, so its deprecation
+      # warnings must not stop the build
       CMAKE_OPTS: >-
         -DWANT_QT6=ON
-        -DUSE_WERROR=ON
+        -DUSE_WERROR=OFF
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
         -DTARGET_UARCH=official
         -DUSE_COMPILE_CACHE=ON
