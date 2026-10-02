@@ -6,7 +6,14 @@
 	<p><b>Make music together, live, in LMMS.</b><br>
 	An unofficial version of <a href="https://lmms.io">LMMS</a> with real-time collaboration.</p>
 	<p>
-		<a href="https://github.com/adri21mg/lmms-collab/releases/latest"><b>Download for Windows</b></a>
+		<b>Download:</b>
+		<a href="https://github.com/adri21mg/lmms-collab/releases/latest/download/LMMS-Collab-Setup-win64.exe"><b>Windows</b></a>
+		·
+		<a href="https://github.com/adri21mg/lmms-collab/releases/latest/download/LMMS-Collab-macOS-AppleSilicon.dmg"><b>macOS</b></a>
+		·
+		<a href="https://github.com/adri21mg/lmms-collab/releases/latest/download/LMMS-Collab-Linux-x86_64.AppImage"><b>Linux</b></a>
+		<br>
+		<a href="https://github.com/adri21mg/lmms-collab/releases/latest">All downloads</a>
 		⦁︎
 		<a href="collab/deploy/README.md">Run a server</a>
 		⦁︎
@@ -32,9 +39,8 @@ Everything else is LMMS as you know it.
 
 ## Get started
 
-1. **Download** the installer (or the portable ZIP) from [Releases](https://github.com/adri21mg/lmms-collab/releases/latest).
-   It installs next to LMMS without touching it. Windows may say "Windows protected your PC" because the installer
-   is not signed: *More info → Run anyway*.
+1. **Download** it for Windows, macOS or Linux from [Releases](https://github.com/adri21mg/lmms-collab/releases/latest)
+   (how to open the unsigned apps is explained there). It keeps its own settings and projects, apart from LMMS.
 2. **One of you hosts:** *Collaboration → Connect... → Host a session*, or run an always-on server on a PC or
    Ubuntu machine: [server guide](collab/deploy/README.md).
 3. **The others join:** *Collaboration → Connect...*, the server's address with its port (e.g. `100.64.1.2:42871`;
@@ -42,7 +48,7 @@ Everything else is LMMS as you know it.
 
 Playing with friends over the internet? [Tailscale](https://tailscale.com) is the easy and safe way: no ports to open.
 
-Windows only for now. Based on LMMS 1.3.0-alpha.
+Based on LMMS 1.3.0-alpha. Windows is the most tested; macOS and Linux are new, so tell us if something is odd.
 
 ## Credits
 
