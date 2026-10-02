@@ -62,6 +62,14 @@
 using namespace lmms;
 using namespace lmms::collab;
 
+//! Longest waits for things to happen (never slower when they do): CI machines are much slower than a desktop
+constexpr int slow(int ms) { return ms * 3; }
+// The same for the waits without an explicit timeout (Qt's default is 5 s)
+#undef QTRY_VERIFY
+#define QTRY_VERIFY(expr) QTRY_VERIFY_WITH_TIMEOUT(expr, slow(5000))
+#undef QTRY_COMPARE
+#define QTRY_COMPARE(expr, expected) QTRY_COMPARE_WITH_TIMEOUT(expr, expected, slow(5000))
+
 //! Minimal second collaborator speaking the wire protocol directly
 class FakePeer
 {
@@ -81,7 +89,7 @@ public:
 	void sendOps(const QJsonArray& ops) { send({{"t", "tx"}, {"ctx", ++m_ctx}, {"ops", ops}}); }
 
 	//! Next message (optionally of a given type), waiting up to @p timeoutMs; empty object on timeout
-	QJsonObject next(const QString& type = {}, int timeoutMs = 3000)
+	QJsonObject next(const QString& type = {}, int timeoutMs = slow(3000))
 	{
 		QElapsedTimer timer;
 		timer.start();
@@ -110,7 +118,7 @@ public:
 	}
 
 	//! Next transaction sent by someone other than us
-	QJsonObject nextForeignTx(int timeoutMs = 3000)
+	QJsonObject nextForeignTx(int timeoutMs = slow(3000))
 	{
 		QElapsedTimer timer;
 		timer.start();
@@ -124,7 +132,7 @@ public:
 	}
 
 	//! Next operation of type @p opType sent by someone else (other ops, e.g. derived clip lengths, are skipped)
-	QJsonObject nextForeignOp(const QString& opType, int timeoutMs = 3000)
+	QJsonObject nextForeignOp(const QString& opType, int timeoutMs = slow(3000))
 	{
 		QElapsedTimer timer;
 		timer.start();
@@ -264,7 +272,7 @@ private slots:
 	{
 		auto session = CollabSession::instance();
 		session->connectToServer("127.0.0.1", m_port, "Adri", "session-test", CollabSession::JoinMode::Create);
-		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 5000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, slow(5000));
 
 		QVERIFY(m_peer.connectTo(m_port));
 		m_peer.send({{"t", "open"}, {"project", "session-test"}});
@@ -1227,7 +1235,7 @@ private slots:
 		QCOMPARE(snarePath, QString{"snare.wav"});
 		const QString snareHash = QString::fromLatin1(QCryptographicHash::hash(snare, QCryptographicHash::Sha256).toHex());
 		m_peer.sendOps({QJsonObject{{"op", "library.add"}, {"path", snarePath}, {"hash", snareHash}, {"size", snare.size()}}});
-		QTRY_COMPARE_WITH_TIMEOUT(QFileInfo{libraryDir + "snare.wav"}.size(), static_cast<qint64>(snare.size()), 5000);
+		QTRY_COMPARE_WITH_TIMEOUT(QFileInfo{libraryDir + "snare.wav"}.size(), static_cast<qint64>(snare.size()), slow(5000));
 		QFile in{libraryDir + "snare.wav"};
 		QVERIFY(in.open(QIODevice::ReadOnly));
 		QCOMPARE(in.readAll(), snare);
@@ -1250,7 +1258,7 @@ private slots:
 		session->disconnectFromServer();
 		QDir{libraryDir}.removeRecursively();
 		session->connectToServer("127.0.0.1", m_port, "Adri", "session-test", CollabSession::JoinMode::Open);
-		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 5000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, slow(5000));
 		QCOMPARE(QFileInfo{libraryDir + "snare.wav"}.size(), static_cast<qint64>(snare.size()));
 		QCOMPARE(QFileInfo{libraryDir + "my-kick.wav"}.size(), static_cast<qint64>(kick.size()));
 		bool kickLoaded = false;
@@ -1301,10 +1309,10 @@ private slots:
 					R"(<sampleclip cid="0000000000400002" pos="0" len="192" muted="0" src="shared:late.wav" off="0"/></track>)"}
 					.arg(trackId)}}});
 
-		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 15000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, slow(15000));
 		QCOMPARE(QFileInfo{libraryDir + "big.wav"}.size(), static_cast<qint64>(big.size()));
 		QTRY_VERIFY(findTrack(idFromString(trackId)) != nullptr);
-		QTRY_COMPARE_WITH_TIMEOUT(QFileInfo{libraryDir + "late.wav"}.size(), static_cast<qint64>(late.size()), 5000);
+		QTRY_COMPARE_WITH_TIMEOUT(QFileInfo{libraryDir + "late.wav"}.size(), static_cast<qint64>(late.size()), slow(5000));
 		auto clip = dynamic_cast<SampleClip*>(findTrack(idFromString(trackId))->getClips().front());
 		QCOMPARE(clip->sampleFile(), QString{"shared:late.wav"});
 		QVERIFY2(clip->sample().sampleSize() > 1000, "the clip plays the real file, not the placeholder");
@@ -1319,9 +1327,9 @@ private slots:
 		// A change is sent, then the server writes it to disk; "save now" does it at once
 		// (the project was loaded again by the tests before: a new track rather than m_clip)
 		Track::create(Track::Type::Instrument, Engine::getSong());
-		QTRY_COMPARE_WITH_TIMEOUT(session->syncStatus(), CollabSession::SyncStatus::Saving, 3000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->syncStatus(), CollabSession::SyncStatus::Saving, slow(3000));
 		session->saveNow();
-		QTRY_COMPARE_WITH_TIMEOUT(session->syncStatus(), CollabSession::SyncStatus::Saved, 3000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->syncStatus(), CollabSession::SyncStatus::Saved, slow(3000));
 		QVERIFY(session->lastSaved().isValid());
 
 		// The server lists its projects, with who is connected
@@ -1357,17 +1365,17 @@ private slots:
 		auto track = dynamic_cast<InstrumentTrack*>(Track::create(Track::Type::Instrument, Engine::getSong()));
 		QVERIFY(track);
 		session->flushAll();
-		QVERIFY(session->waitUntilSaved(3000));
+		QVERIFY(session->waitUntilSaved(slow(3000)));
 		const QString trackId = proto::idString(track->collabId());
 		// A collaborator gives the track a plugin this computer does not have
 		const QString instrument = "<instrument name=\"nonexistentsynth\"><nonexistentsynth secret=\"42\" knob=\"0.7\"/></instrument>";
 		m_peer.sendOps({QJsonObject{{"op", "instrument.set"}, {"track", trackId}, {"xml", instrument}},
 			QJsonObject{{"op", "track.state"}, {"id", trackId},
 				{"xml", "<instrumenttrack vol=\"100\" pan=\"0\">" + instrument + "</instrumenttrack>"}}});
-		QTRY_VERIFY_WITH_TIMEOUT(dynamic_cast<DummyInstrument*>(track->instrument()), 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(dynamic_cast<DummyInstrument*>(track->instrument()), slow(5000));
 		QCOMPARE(track->instrument()->pluginName(), QString{"nonexistentsynth"});
 		// Told once, without a message box (the tests load no plugins, so others may be listed too)
-		QTRY_VERIFY_WITH_TIMEOUT(missing.contains("nonexistentsynth"), 3000);
+		QTRY_VERIFY_WITH_TIMEOUT(missing.contains("nonexistentsynth"), slow(3000));
 		QCOMPARE(missing.count("nonexistentsynth"), 1);
 		// This user changes the track: what reaches the server still has the plugin and its settings
 		// (after a moment, as a person would: a new track's knobs are watched from the next tick on)
@@ -1388,7 +1396,7 @@ private slots:
 			}
 			return false;
 		};
-		QTRY_VERIFY2_WITH_TIMEOUT(pluginKept(), qPrintable(lastSettings.left(600)), 8000);
+		QTRY_VERIFY2_WITH_TIMEOUT(pluginKept(), qPrintable(lastSettings.left(600)), slow(8000));
 		disconnect(c);
 	}
 
@@ -1424,7 +1432,7 @@ private slots:
 		QVERIFY(track);
 		track->setName("Version marker");
 		session->createVersion("Before the chorus\nAdri's bass");
-		QTRY_VERIFY_WITH_TIMEOUT(!created.isEmpty(), 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(!created.isEmpty(), slow(5000));
 		QCOMPARE(created.value("by").toString(), session->userName());
 		QCOMPARE(created.value("description").toString(), QString{"Before the chorus\nAdri's bass"});
 		QCOMPARE(created.value("p4").toObject().value("state").toString(), QString{"off"}); // no Perforce here
@@ -1434,10 +1442,10 @@ private slots:
 		QVERIFY(mmp.open(QIODevice::ReadOnly));
 		QVERIFY(mmp.readAll().contains("Version marker"));
 		session->createVersion("   ");
-		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), slow(5000));
 		QCOMPARE(session->state(), CollabSession::State::Live); // a refused version does not end the session
 		session->requestVersions();
-		QTRY_VERIFY_WITH_TIMEOUT(!listed.isEmpty(), 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(!listed.isEmpty(), slow(5000));
 		QCOMPARE(listed.last().toObject().value("id").toInt(), created.value("id").toInt());
 		disconnect(c1);
 		disconnect(c2);
@@ -1453,7 +1461,7 @@ private slots:
 		auto c2 = connect(session, &CollabSession::versionRestored, [&](const QJsonObject& r) { restored = r; });
 		auto c3 = connect(session, &CollabSession::versionsReceived, [&](const QJsonArray& v) { listed = v; });
 		session->createVersion("Before the bridge");
-		QTRY_VERIFY_WITH_TIMEOUT(!created.isEmpty(), 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(!created.isEmpty(), slow(5000));
 		const int id = created.value("id").toInt();
 		// A change after that version...
 		auto track = Track::create(Track::Type::Instrument, Engine::getSong());
@@ -1464,14 +1472,14 @@ private slots:
 		};
 		created = {};
 		session->flushAll();
-		QVERIFY(session->waitUntilSaved(3000));
+		QVERIFY(session->waitUntilSaved(slow(3000)));
 		m_peer.drain();
 		session->restoreVersion(id);
 		// ...is gone for everyone once the version is restored, and kept in the safety version
-		QTRY_VERIFY_WITH_TIMEOUT(!restored.isEmpty(), 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(!restored.isEmpty(), slow(5000));
 		QCOMPARE(restored.value("id").toInt(), id);
 		QCOMPARE(restored.value("by").toString(), session->userName());
-		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 10000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, slow(10000));
 		QVERIFY(!hasTrack());
 		// Loading the restored project is not a change of this user: nothing is sent back
 		QVERIFY2(m_peer.nextForeignOp("instrument.set", 1000).isEmpty(), "no instrument echoed after a restore");
@@ -1485,7 +1493,7 @@ private slots:
 		auto after = Track::create(Track::Type::Instrument, Engine::getSong());
 		after->setName("After the restore");
 		session->flushAll();
-		QVERIFY(session->waitUntilSaved(3000));
+		QVERIFY(session->waitUntilSaved(slow(3000)));
 		QCOMPARE(session->state(), CollabSession::State::Live);
 		disconnect(c1);
 		disconnect(c2);
@@ -1500,7 +1508,7 @@ private slots:
 		QVERIFY(track);
 		auto clip = new MidiClip(track);
 		session->flushAll();
-		QVERIFY(session->waitUntilSaved(3000));
+		QVERIFY(session->waitUntilSaved(slow(3000)));
 		const collab_id_t clipId = clip->collabId();
 		// Someone removes it while we add a note to it: the server cannot take our note
 		m_peer.sendOps({QJsonObject{{"op", "clip.remove"}, {"id", proto::idString(clipId)}}});
@@ -1508,8 +1516,8 @@ private slots:
 		clip->addNote(Note{TimePos{48}, TimePos{0}, 67}, false);
 		session->flushAll();
 		// The model differs from the project now: it is loaded again from the server
-		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Reconnecting, 5000);
-		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 15000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Reconnecting, slow(5000));
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, slow(15000));
 		QVERIFY(session->hadOfflineChanges()); // the user was offered to keep that version
 		bool found = false;
 		for (Track* t : Engine::getSong()->tracks())
@@ -1522,11 +1530,11 @@ private slots:
 	void testReconnect()
 	{
 		auto session = CollabSession::instance();
-		QVERIFY(session->waitUntilSaved(3000));
+		QVERIFY(session->waitUntilSaved(slow(3000)));
 		// The server goes away: the session keeps trying, and is back once the server is
 		m_server.kill();
 		m_server.waitForFinished(3000);
-		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Reconnecting, 5000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Reconnecting, slow(5000));
 		// Meanwhile a clip is moved (LMMS does not mark that as "modified"): it counts as an offline change, and
 		// the project continues as it is on the server
 		const auto firstClip = [] () -> std::pair<int, Clip*> {
@@ -1543,7 +1551,7 @@ private slots:
 		clip->movePosition(position + TimePos::ticksPerBar());
 		m_server.start(COLLAB_SERVER_EXE, {"--port", QString::number(m_port), "--data", m_dataDir.path()});
 		QVERIFY(m_server.waitForStarted(5000));
-		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 15000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, slow(15000));
 		QCOMPARE(session->projectName(), QString{"session-test"});
 		QVERIFY(session->hadOfflineChanges());
 		auto [trackAfter, clipAfter] = firstClip();
@@ -1575,25 +1583,25 @@ private slots:
 		};
 		// Without the password, or with a wrong one, there is no session
 		connectWith({});
-		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), slow(5000));
 		QVERIFY2(error.contains("password"), qPrintable(error));
 		QCOMPARE(session->state(), CollabSession::State::Disconnected);
 		connectWith(proto::passwordKey("wrong"));
-		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), slow(5000));
 		QVERIFY2(error.contains("Wrong password"), qPrintable(error));
 		// The right one: the session starts (the server has no certificate: not encrypted)
 		connectWith(proto::passwordKey("s3cret pass"));
-		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 5000);
+		QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, slow(5000));
 		QVERIFY(!session->isEncrypted());
 		session->leave();
 		// Repeated wrong passwords make that address wait
 		for (int i = 0; i < 5; ++i)
 		{
 			connectWith(proto::passwordKey("guess"));
-			QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+			QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), slow(5000));
 		}
 		connectWith(proto::passwordKey("s3cret pass"));
-		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+		QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), slow(5000));
 		QVERIFY2(error.contains("try again"), qPrintable(error));
 		disconnect(c);
 		server.kill();
@@ -1618,14 +1626,14 @@ private slots:
 			QProcess server;
 			QVERIFY(startExtraServer(server, port, data.path(), {"--tls-cert", dir + "/tls1.crt", "--tls-key", dir + "/tls1.key"}));
 			session->connectToServer("127.0.0.1", port, "Adri", "tls-test", CollabSession::JoinMode::Create);
-			QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(session->state(), CollabSession::State::Live, slow(5000));
 			QVERIFY(session->isEncrypted());
 			QVERIFY(!session->serverFingerprint().isEmpty());
 			QCOMPARE(collab::CollabConnection::pinnedFingerprint("127.0.0.1", port), session->serverFingerprint());
 			// The session works through it (a change reaches the server and comes back acknowledged)
 			Track::create(Track::Type::Instrument, Engine::getSong())->setName("Over TLS");
 			session->flushAll();
-			QVERIFY(session->waitUntilSaved(3000));
+			QVERIFY(session->waitUntilSaved(slow(3000)));
 			session->leave();
 			server.kill();
 			server.waitForFinished(3000);
@@ -1639,7 +1647,7 @@ private slots:
 			auto c2 = connect(session, &CollabSession::serverCertificateChanged,
 				[&](const QString&, quint16, const QString& fingerprint) { changed = fingerprint; });
 			connectNow();
-			QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+			QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), slow(5000));
 			QCOMPARE(session->state(), CollabSession::State::Disconnected);
 			QVERIFY(!changed.isEmpty() && changed != pinned);
 			QCOMPARE(collab::CollabConnection::pinnedFingerprint("127.0.0.1", port), pinned);
@@ -1652,7 +1660,7 @@ private slots:
 			QProcess server;
 			QVERIFY(startExtraServer(server, port, data.path()));
 			connectNow();
-			QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), 5000);
+			QTRY_VERIFY_WITH_TIMEOUT(!error.isEmpty(), slow(5000));
 			QVERIFY2(error.contains("used to be encrypted"), qPrintable(error));
 			QCOMPARE(session->state(), CollabSession::State::Disconnected);
 			server.kill();
