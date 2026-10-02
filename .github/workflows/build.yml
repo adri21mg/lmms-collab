@@ -299,6 +299,8 @@ jobs:
   mingw:
     name: mingw64
     runs-on: ubuntu-latest
+    # LMMS-Collab needs Qt 6.4; this cross build uses Qt 5 (Windows builds come from the msvc job)
+    if: false
     env:
       CMAKE_OPTS: >-
         -Werror=dev
