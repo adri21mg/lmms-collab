@@ -130,6 +130,9 @@ private:
 	QJsonObject m_presence;
 	QJsonObject m_sentPresence;
 	bool m_showPlayheads = true;
+	//! Testing (LMMS_COLLAB_SELFTEST_FX): the pointer is taken to be over this widget, at its center
+	QPointer<QWidget> m_testPointer;
+	void startEffectSelfTest(const QString& role);
 };
 
 
@@ -148,6 +151,9 @@ private:
 	//! Same height as the menu bar's items, so the menu bar never changes its height
 	void matchMenuHeight();
 	void updateSpinner();
+	//! At the right of the main toolbar, when the menu bar is the system's (macOS)
+	void placeInToolBar();
+	bool eventFilter(QObject* watched, QEvent* event) override;
 
 	CollabPresence* m_presence;
 	QHBoxLayout* m_layout;

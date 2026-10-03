@@ -44,6 +44,8 @@
 #include <QMessageBox>
 #include <QColorDialog>
 #include <QCursor>
+#include <QDir>
+#include <QJsonDocument>
 #include <QElapsedTimer>
 #include <QHBoxLayout>
 #include <QMdiArea>
@@ -68,6 +70,7 @@
 #include "EffectControlDialog.h"
 #include "EffectControls.h"
 #include "EffectRackView.h"
+#include "EffectView.h"
 #include "Engine.h"
 #include "GuiApplication.h"
 #include "InstrumentTrack.h"
@@ -290,6 +293,12 @@ void bringToFront(MainWindow* mainWindow, QWidget* content)
 	if (!subWindow) { return; }
 	subWindow->show();
 	content->show();
+	if (content->isWindow()) // detached
+	{
+		content->raise();
+		content->activateWindow();
+		return;
+	}
 	subWindow->raise();
 	mainWindow->workspace()->setActiveSubWindow(subWindow);
 }
@@ -574,6 +583,83 @@ CollabPresence::CollabPresence(MainWindow* mainWindow) :
 	m_sampleTimer.start();
 	m_sendTimer.setSingleShot(true);
 	connect(&m_sendTimer, &QTimer::timeout, this, &CollabPresence::send);
+
+	// Testing with real windows: LMMS_COLLAB_SELFTEST_FX="point" or "watch" opens the Controls of the first
+	// instrument's first effect; "point" pretends the pointer is over them, "watch" logs where it sees the others
+	if (const QString role = qEnvironmentVariable("LMMS_COLLAB_SELFTEST_FX"); !role.isEmpty())
+	{
+		startEffectSelfTest(role);
+	}
+}
+
+
+void CollabPresence::startEffectSelfTest(const QString& role)
+{
+	auto started = std::make_shared<bool>(false);
+	connect(CollabSession::instance(), &CollabSession::stateChanged, this, [this, role, started] {
+		if (*started || CollabSession::instance()->state() != CollabSession::State::Live) { return; }
+		*started = true;
+		QTimer::singleShot(3000, this, [this, role] {
+			auto session = CollabSession::instance();
+			// The first instrument with an effect, else the Mixer (its Master channel)
+			QWidget* holder = nullptr;
+			for (TrackView* view : getGUI()->songEditor()->m_editor->trackViews())
+			{
+				auto instrumentView = dynamic_cast<InstrumentTrackView*>(view);
+				if (!instrumentView) { continue; }
+				InstrumentTrackWindow* window = instrumentView->getInstrumentTrackWindow();
+				if (window->findChildren<EffectView*>().isEmpty()) { continue; }
+				holder = window;
+				break;
+			}
+			if (!holder) { holder = getGUI()->mixerView(); }
+			holder->parentWidget()->show();
+			const auto effects = holder->findChildren<EffectView*>();
+			if (!effects.isEmpty()) { QMetaObject::invokeMethod(effects.first(), "editControls"); }
+			for (QMdiSubWindow* sub : m_mainWindow->workspace()->subWindowList())
+			{
+				if (auto dialog = dynamic_cast<EffectControlDialog*>(sub->widget()); dialog && dialog->isVisible())
+				{
+					if (role.endsWith("-detached")) { QMetaObject::invokeMethod(sub, "detach"); }
+					session->log(QString{"selftest fx: controls open in %1, key \"%2\""}
+						.arg(holder->metaObject()->className(), windowKeyOf(dialog)));
+					if (role.startsWith("point"))
+					{
+						m_testPointer = dialog->childAt(dialog->rect().center());
+						if (!m_testPointer) { m_testPointer = dialog; }
+						session->log(QString{"selftest fx: pointing at a %1"}.arg(m_testPointer->metaObject()->className()));
+					}
+				}
+			}
+			if (!role.startsWith("watch")) { return; }
+			auto timer = new QTimer(this);
+			connect(timer, &QTimer::timeout, this, [this, session] {
+				for (QMdiSubWindow* sub : m_mainWindow->workspace()->subWindowList())
+				{
+					auto dialog = dynamic_cast<EffectControlDialog*>(sub->widget());
+					if (!dialog || !dialog->isVisible()) { continue; }
+					for (const auto& [id, user] : m_users)
+					{
+						const auto at = locate(dialog, user.cursor);
+						session->log(QString{"selftest fx: %1 cursor %2 -> %3"}.arg(user.name,
+							QString::fromUtf8(QJsonDocument{user.cursor}.toJson(QJsonDocument::Compact)),
+							at ? QString{"%1,%2"}.arg(at->x()).arg(at->y()) : QString{"not shown"}));
+					}
+				}
+			});
+			timer->start(1000);
+			QTimer::singleShot(16000, this, [this, session] {
+				for (QMdiSubWindow* sub : m_mainWindow->workspace()->subWindowList())
+				{
+					if (!dynamic_cast<EffectControlDialog*>(sub->widget()) || !sub->widget()->isVisible()) { continue; }
+					const QString file = QDir::temp().filePath("lmms-collab-selftest-fx.png");
+					sub->widget()->grab().save(file);
+					session->log("selftest fx: saved " + file);
+				}
+				m_mainWindow->toolBar()->grab().save(QDir::temp().filePath("lmms-collab-selftest-toolbar.png"));
+			});
+		});
+	});
 }
 
 
@@ -608,6 +694,12 @@ void CollabPresence::sample()
 	const QJsonObject presence{{"cursor", localCursor()}, {"play", localPlay()}, {"view", localView()}};
 	if (presence != m_presence || m_sentPresence.contains("_"))
 	{
+		// Diagnostics: which shared window the pointer is over, when that changes
+		if (const QString window = presence.value("cursor").toObject().value("w").toString();
+			window != m_presence.value("cursor").toObject().value("w").toString() && !window.isEmpty())
+		{
+			CollabSession::instance()->log("pointer over " + window);
+		}
 		m_presence = presence;
 		if (!m_sendTimer.isActive()) { m_sendTimer.start(SendIntervalMs); }
 	}
@@ -686,9 +778,14 @@ static bool pointerOver(QWidget* window)
 
 QJsonObject CollabPresence::localCursor() const
 {
-	const QPoint global = QCursor::pos();
+	QPoint global = QCursor::pos();
 	QWidget* widget = QApplication::widgetAt(global); // only this instance's windows
-	if (!widget || !pointerOver(widget->window())) { return {}; } // another program's window may be on top
+	if (m_testPointer)
+	{
+		widget = m_testPointer;
+		global = widget->mapToGlobal(widget->rect().center());
+	}
+	else if (!widget || !pointerOver(widget->window())) { return {}; } // another program's window may be on top
 	QWidget* content = contentOf(widget);
 	const QString window = windowKeyOf(content);
 	if (window.isEmpty()) { return {}; }
@@ -1133,7 +1230,8 @@ void CollabPresence::updateOverlays()
 	}
 	for (QMdiSubWindow* subWindow : m_mainWindow->workspace()->subWindowList())
 	{
-		if (subWindow->isVisible()) { contents.push_back(subWindow->widget()); }
+		// A detached window (its own top-level window) is shown without its sub window frame
+		if (subWindow->widget() && subWindow->widget()->isVisible()) { contents.push_back(subWindow->widget()); }
 	}
 	for (QWidget* content : contents)
 	{
@@ -1342,6 +1440,27 @@ CollabPresenceBar::CollabPresenceBar(CollabPresence* presence, QWidget* parent) 
 	updateStatus();
 	rebuild();
 	QTimer::singleShot(0, this, &CollabPresenceBar::matchMenuHeight); // once the menu bar has laid out its items
+	if (!qobject_cast<QMenuBar*>(parent))
+	{
+		// In the main toolbar (macOS): its top right corner, wherever the window is resized
+		parent->installEventFilter(this);
+		QTimer::singleShot(0, this, &CollabPresenceBar::relayout);
+	}
+}
+
+
+bool CollabPresenceBar::eventFilter(QObject* watched, QEvent* event)
+{
+	if (watched == parentWidget() && event->type() == QEvent::Resize) { placeInToolBar(); }
+	return QWidget::eventFilter(watched, event);
+}
+
+
+void CollabPresenceBar::placeInToolBar()
+{
+	move(parentWidget()->width() - width(), 2);
+	raise();
+	show();
 }
 
 
@@ -1482,6 +1601,11 @@ void CollabPresenceBar::relayout()
 	// stay partly outside a maximized window (this runs often: only when the size really changed)
 	const QSize before = size();
 	adjustSize();
+	if (!qobject_cast<QMenuBar*>(parentWidget()))
+	{
+		placeInToolBar();
+		return;
+	}
 	if (size() == before) { return; }
 	if (auto menuBar = qobject_cast<QMenuBar*>(parentWidget()))
 	{

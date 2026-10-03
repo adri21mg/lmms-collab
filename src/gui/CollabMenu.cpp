@@ -97,9 +97,17 @@ CollabMenu::CollabMenu(MainWindow* mainWindow) :
 	m_versionsAction = addAction(tr("Versions..."), this, &CollabMenu::showVersions);
 	addSeparator();
 
-	// Collaborators' cursors and where they are (shown at the right of the menu bar)
+	// Collaborators' cursors and where they are (shown at the right of the menu bar; macOS shows the menus in its
+	// own menu bar at the top of the screen, without corner widgets: there at the right of the main toolbar)
 	auto presence = new CollabPresence(mainWindow);
-	mainWindow->menuBar()->setCornerWidget(new CollabPresenceBar(presence, mainWindow->menuBar()), Qt::TopRightCorner);
+	if (mainWindow->menuBar()->isNativeMenuBar() || qEnvironmentVariableIsSet("LMMS_COLLAB_BAR_IN_TOOLBAR"))
+	{
+		new CollabPresenceBar(presence, mainWindow->toolBar());
+	}
+	else
+	{
+		mainWindow->menuBar()->setCornerWidget(new CollabPresenceBar(presence, mainWindow->menuBar()), Qt::TopRightCorner);
+	}
 	auto playheads = addAction(tr("Show collaborators' playback position"));
 	playheads->setCheckable(true);
 	playheads->setChecked(presence->showPlayheads());
