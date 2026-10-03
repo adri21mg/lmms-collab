@@ -626,6 +626,9 @@ LMMS_EXPORT EffectChain* effectChainOf(collab_id_t owner);
 LMMS_EXPORT QString effectOwnerName(collab_id_t owner);
 //! Position of @p effect in its chain, or -1
 LMMS_EXPORT int effectIndex(const Effect* effect);
+//! The effect whose controls are @p controls (e.g. an effect window's model), or nullptr. Not a dynamic_cast:
+//! EffectControls is not exported, and on macOS casting to it an object made by an effect plugin fails
+LMMS_EXPORT Effect* effectOfControls(const Model* controls);
 LMMS_EXPORT Effect* effectAt(collab_id_t owner, int index);
 //! The mixer channel with id @p id, or nullptr
 LMMS_EXPORT MixerChannel* findMixerChannel(collab_id_t id);

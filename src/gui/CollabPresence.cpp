@@ -748,8 +748,7 @@ QString CollabPresence::windowKeyOf(QWidget* content)
 	if (auto window = dynamic_cast<InstrumentTrackWindow*>(content)) { return key("instrument", window->model()->collabId()); }
 	if (auto dialog = dynamic_cast<EffectControlDialog*>(content))
 	{
-		auto controls = dynamic_cast<EffectControls*>(dialog->model());
-		const Effect* effect = controls ? controls->effect() : nullptr;
+		const Effect* effect = collab::effectOfControls(dialog->model());
 		// Effects of a track or of a mixer channel
 		const collab_id_t owner = effect ? collab::effectOwner(effect) : 0;
 		if (owner) { return QString{"%1:%2"}.arg(key("effect", owner)).arg(collab::effectIndex(effect)); }
@@ -1372,8 +1371,7 @@ void CollabPresence::goTo(const QString& clientId)
 		for (QMdiSubWindow* subWindow : m_mainWindow->workspace()->subWindowList())
 		{
 			auto dialog = dynamic_cast<EffectControlDialog*>(subWindow->widget());
-			auto controls = dialog ? dynamic_cast<EffectControls*>(dialog->model()) : nullptr;
-			if (effect && controls && controls->effect() == effect)
+			if (effect && dialog && collab::effectOfControls(dialog->model()) == effect)
 			{
 				bringToFront(m_mainWindow, dialog);
 				return;

@@ -650,8 +650,8 @@ QSet<collab_id_t> CollabSession::tracksBeingEdited()
 		if (auto window = dynamic_cast<gui::InstrumentTrackWindow*>(content)) { tracks.insert(window->model()->collabId()); }
 		else if (auto dialog = dynamic_cast<gui::EffectControlDialog*>(content))
 		{
-			auto controls = dynamic_cast<EffectControls*>(dialog->model());
-			if (const collab_id_t owner = controls ? effectOwner(controls->effect()) : 0) { tracks.insert(owner); }
+			const Effect* effect = effectOfControls(dialog->model());
+			if (const collab_id_t owner = effect ? effectOwner(effect) : 0) { tracks.insert(owner); }
 		}
 	}
 	return tracks;
@@ -987,6 +987,33 @@ collab_id_t effectOwner(const Effect* effect)
 		if (holds(&channel->m_fxChain)) { return channel->collabId(); }
 	}
 	return 0;
+}
+
+
+Effect* effectOfControls(const Model* controls)
+{
+	if (!controls) { return nullptr; }
+	auto in = [controls](const EffectChain* chain) -> Effect* {
+		if (!chain) { return nullptr; }
+		for (Effect* effect : chain->effects())
+		{
+			if (static_cast<const Model*>(effect->controls()) == controls) { return effect; }
+		}
+		return nullptr;
+	};
+	for (const TrackContainer* container : {static_cast<TrackContainer*>(Engine::getSong()),
+		static_cast<TrackContainer*>(Engine::patternStore())})
+	{
+		for (Track* track : container->tracks())
+		{
+			if (Effect* effect = in(effectsOf(track))) { return effect; }
+		}
+	}
+	for (int i = 0; i < static_cast<int>(Engine::mixer()->numChannels()); ++i)
+	{
+		if (Effect* effect = in(&Engine::mixer()->mixerChannel(i)->m_fxChain)) { return effect; }
+	}
+	return nullptr;
 }
 
 
