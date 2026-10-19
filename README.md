@@ -17,9 +17,9 @@
 		⦁︎
 		<a href="collab/deploy/README.md">Run a server</a>
 		⦁︎
-		<a href="https://systmstudio.com">systmstudio.com</a>
+		<a href="https://nulloffset.com">nulloffset.com</a>
 	</p>
-	<p><a href="https://ko-fi.com/systmstudio"><img src="collab/assets/kofi-button.gif" width="210" alt="Support me on Ko-fi"></a></p>
+	<p><a href="https://ko-fi.com/nulloffset"><img src="collab/assets/kofi-button.gif" width="210" alt="Support me on Ko-fi"></a></p>
 </div>
 
 <p align="center"><img src="collab/assets/demo-song.gif" alt="Two people editing the same song at the same time" width="100%"></p>
@@ -139,7 +139,7 @@ explains it and how to keep it safe.
 
 ## Credits
 
-- **LMMS-Collab** by Adri, [Systm Studio](https://systmstudio.com), built entirely with
+- **LMMS-Collab** by Adri, [nulloffset](https://nulloffset.com), built entirely with
   [Claude](https://claude.com) by Anthropic.
 - **LMMS** by the [LMMS developers](https://github.com/LMMS/lmms): all the credit for LMMS itself is theirs.
   LMMS-Collab is not affiliated with or endorsed by the LMMS project.
@@ -147,4 +147,4 @@ explains it and how to keep it safe.
 
 If LMMS-Collab is useful to you:
 
-<p align="center"><a href="https://ko-fi.com/systmstudio"><img src="collab/assets/kofi-button.gif" width="210" alt="Support me on Ko-fi"></a></p>
+<p align="center"><a href="https://ko-fi.com/nulloffset"><img src="collab/assets/kofi-button.gif" width="210" alt="Support me on Ko-fi"></a></p>
